@@ -1,19 +1,13 @@
-<p align="center">
-  <img src="assets/banner.png" alt="pulse-import — Jira CSV to Pulse" width="820">
-</p>
+<div align="center">
 
-<p align="center">
-  <strong>Import issues into <a href="https://trypulse.tech">Pulse</a> from other tools.</strong><br>
-  v1: <code>Jira CSV → Pulse issues + Main Docs</code>
-</p>
+<img src="assets/banner.png" alt="pulse-import — Jira CSV to Pulse" width="820">
 
-<p align="center">
-  <a href="https://github.com/try-pulse/pulse-import/actions/workflows/ci.yml?query=branch%3Amain"><img src="https://github.com/try-pulse/pulse-import/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>&nbsp;
-  <a href="https://github.com/try-pulse/pulse-import/releases/latest"><img src="https://img.shields.io/github/v/release/try-pulse/pulse-import?sort=semver&label=release" alt="Release"></a>&nbsp;
-  <a href="https://go.dev/"><img src="https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go&logoColor=white" alt="Go"></a>&nbsp;
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License"></a>&nbsp;
-  <a href="https://github.com/try-pulse/pulse-import/pkgs/container/pulse-import"><img src="https://img.shields.io/badge/GHCR-pulse--import-blue?logo=github" alt="GHCR"></a>
-</p>
+**Import issues into [Pulse](https://trypulse.tech) from other tools.**  
+v1: `Jira CSV → Pulse issues + Main Docs`
+
+[![CI](https://github.com/try-pulse/pulse-import/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/try-pulse/pulse-import/actions/workflows/ci.yml?query=branch%3Amain) [![release](https://img.shields.io/github/v/release/try-pulse/pulse-import?sort=semver&label=release)](https://github.com/try-pulse/pulse-import/releases/latest) [![Go](https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go&logoColor=white)](https://go.dev/) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) [![GHCR](https://img.shields.io/badge/GHCR-pulse--import-blue?logo=github)](https://github.com/try-pulse/pulse-import/pkgs/container/pulse-import)
+
+</div>
 
 ---
 
