@@ -14,9 +14,9 @@ builds:
       - -mod=vendor
     ldflags:
       - -s -w
-      - -X github.com/trypulse/pulse-import/internal/version.Version={{.Version}}
-      - -X github.com/trypulse/pulse-import/internal/version.Commit={{.ShortCommit}}
-      - -X github.com/trypulse/pulse-import/internal/version.Date={{.Date}}
+      - -X github.com/try-pulse/pulse-import/internal/version.Version={{.Version}}
+      - -X github.com/try-pulse/pulse-import/internal/version.Commit={{.ShortCommit}}
+      - -X github.com/try-pulse/pulse-import/internal/version.Date={{.Date}}
     env:
       - CGO_ENABLED=0
     goos:
@@ -37,6 +37,43 @@ archives:
       - LICENSE
       - README.md
       - CHANGELOG.md
+
+nfpms:
+  - id: pulse-import
+    package_name: pulse-import
+    file_name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    homepage: https://github.com/try-pulse/pulse-import
+    maintainer: Pulse <security@trypulse.tech>
+    description: Import issues into Pulse from external tools (Jira CSV → Pulse)
+    license: MIT
+    formats:
+      - deb
+      - rpm
+      - apk
+    bindir: /usr/bin
+    section: utils
+    priority: optional
+
+dockers:
+  - id: pulse-import-amd64
+    goos: linux
+    goarch: amd64
+    ids:
+      - pulse-import
+    image_templates:
+      - "ghcr.io/try-pulse/pulse-import:{{ .Version }}-amd64"
+      - "ghcr.io/try-pulse/pulse-import:{{ .Version }}"
+      - "ghcr.io/try-pulse/pulse-import:latest"
+    dockerfile: Dockerfile
+    use: buildx
+    build_flag_templates:
+      - "--platform=linux/amd64"
+      - "--label=org.opencontainers.image.title=pulse-import"
+      - "--label=org.opencontainers.image.description=Import issues into Pulse from external tools"
+      - "--label=org.opencontainers.image.source=https://github.com/try-pulse/pulse-import"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
+      - "--label=org.opencontainers.image.licenses=MIT"
 
 checksum:
   name_template: checksums.txt
@@ -77,10 +114,15 @@ release:
 
     ```bash
     # Go
-    go install github.com/trypulse/pulse-import/cmd/pulse-import@v{{ .Version }}
+    go install github.com/try-pulse/pulse-import/cmd/pulse-import@v{{ .Version }}
 
-    # Or download the archive for your OS/arch from the assets below,
-    # extract, and put `pulse-import` on your PATH.
+    # Or download the archive / .deb / .rpm / .apk from the assets below,
+    # extract (or install the package), and put `pulse-import` on your PATH.
+    ```
+
+    ```bash
+    # Container
+    docker pull ghcr.io/try-pulse/pulse-import:{{ .Version }}
     ```
 
     ```bash

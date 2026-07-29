@@ -1,6 +1,6 @@
 module github.com/try-pulse/pulse-import
 
-go 1.22
+go 1.25
 
 require (
 	github.com/charmbracelet/huh v0.6.0
