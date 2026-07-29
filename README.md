@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/banner.svg" alt="pulse-import — Jira CSV to Pulse" width="820">
+  <img src="assets/banner.png" alt="pulse-import — Jira CSV to Pulse" width="820">
 </p>
 
 <p align="center">
@@ -8,10 +8,10 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/try-pulse/pulse-import/actions/workflows/ci.yml?query=branch%3Amain"><img src="https://github.com/try-pulse/pulse-import/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
-  <a href="https://github.com/try-pulse/pulse-import/releases/latest"><img src="https://img.shields.io/github/v/release/try-pulse/pulse-import?sort=semver&label=release" alt="Release"></a>
-  <a href="https://go.dev/"><img src="https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go&logoColor=white" alt="Go"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License"></a>
+  <a href="https://github.com/try-pulse/pulse-import/actions/workflows/ci.yml?query=branch%3Amain"><img src="https://github.com/try-pulse/pulse-import/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>&nbsp;
+  <a href="https://github.com/try-pulse/pulse-import/releases/latest"><img src="https://img.shields.io/github/v/release/try-pulse/pulse-import?sort=semver&label=release" alt="Release"></a>&nbsp;
+  <a href="https://go.dev/"><img src="https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go&logoColor=white" alt="Go"></a>&nbsp;
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License"></a>&nbsp;
   <a href="https://github.com/try-pulse/pulse-import/pkgs/container/pulse-import"><img src="https://img.shields.io/badge/GHCR-pulse--import-blue?logo=github" alt="GHCR"></a>
 </p>
 
