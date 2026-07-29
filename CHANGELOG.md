@@ -7,11 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-07-30
+
+### Fixed
+
+- Docker image build for `dockers_v2`: copy binary via `TARGETPLATFORM` (`linux/<arch>/pulse-import`)
+- Keep nfpm packages out of the Docker build context (separate nfpm id)
+
+### Changed
+
+- Bump GitHub Actions to Node 24–compatible majors (`checkout@v7`, `setup-go@v7`, Docker Buildx/login `@v4`, labeler `@v6`)
+
 ## [0.1.1] - 2026-07-30
 
 ### Changed
 
 - Migrate GoReleaser Docker config from deprecated `dockers` to `dockers_v2` (multi-arch `linux/amd64` + `linux/arm64`)
+
+### Notes
+
+- Tag `v0.1.1` release failed during Docker publish; use `v0.1.2`.
 
 ## [0.1.0] - 2026-07-30
 

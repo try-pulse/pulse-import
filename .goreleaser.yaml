@@ -39,7 +39,7 @@ archives:
       - CHANGELOG.md
 
 nfpms:
-  - id: pulse-import
+  - id: nfpms
     package_name: pulse-import
     file_name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     homepage: https://github.com/try-pulse/pulse-import
@@ -57,6 +57,7 @@ nfpms:
 dockers_v2:
   - id: pulse-import
     dockerfile: Dockerfile
+    # Only the Go binary build — keep nfpm packages out of the Docker context.
     ids:
       - pulse-import
     images:
