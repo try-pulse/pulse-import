@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Pulse product support
+    url: https://trypulse.tech
+    about: Questions about the Pulse product (not this CLI)
+  - name: Security vulnerability
+    url: https://github.com/trypulse/pulse-import/security/advisories/new
+    about: Report a security issue privately (see SECURITY.md)

@@ -1,0 +1,49 @@
+name: Bug report
+description: Something is broken or unexpected in pulse-import
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Redact tokens and personal data.
+  - type: input
+    id: version
+    attributes:
+      label: pulse-import version
+      description: Output of `pulse-import --version`
+      placeholder: v0.1.0 / commit abc123 / dev
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS
+      placeholder: macOS 15 / Ubuntu 24.04 / Windows 11
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Command
+      description: Exact command (redact tokens). Prefer `--dry-run` when sharing.
+      render: bash
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include relevant stderr / logs (redacted).
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Extra context
+      description: Importer used, sample CSV shape (no private data), etc.

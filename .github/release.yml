@@ -1,0 +1,35 @@
+# GitHub automatically generated release notes (Settings → Releases).
+# GoReleaser still builds its own changelog from commits; this shapes
+# the native "Generate release notes" UI if used manually.
+changelog:
+  exclude:
+    labels:
+      - dependencies
+      - duplicate
+      - invalid
+      - wontfix
+    authors:
+      - dependabot
+      - dependabot[bot]
+  categories:
+    - title: Breaking Changes
+      labels:
+        - breaking
+    - title: Features
+      labels:
+        - enhancement
+    - title: Bug Fixes
+      labels:
+        - bug
+    - title: Security
+      labels:
+        - security
+    - title: Documentation
+      labels:
+        - documentation
+    - title: CI
+      labels:
+        - ci
+    - title: Other Changes
+      labels:
+        - "*"

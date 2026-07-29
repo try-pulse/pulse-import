@@ -1,0 +1,65 @@
+# Build outputs (root binary only — do not ignore cmd/pulse-import/)
+/bin/
+/dist/
+/out/
+# GoReleaser local leftovers
+dist/
+artifacts.json
+metadata.json
+/pulse-import
+/pulse-import.exe
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Tests & coverage
+*.test
+*.out
+coverage.out
+coverage.html
+coverage.txt
+profile.cov
+
+# Go
+go.work
+go.work.sum
+
+# GoReleaser local package artifacts
+*.apk
+*.deb
+*.rpm
+
+# Env / secrets (keep the example tracked)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+config.local.yaml
+config.local.yml
+
+# IDE / editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.cursor/
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Logs / temp
+*.log
+*.tmp
+*.temp
+tmp/
+temp/

@@ -1,0 +1,77 @@
+version: "2"
+
+run:
+  timeout: 5m
+  modules-download-mode: vendor
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - misspell
+    - unconvert
+    - revive
+    - gosec
+  settings:
+    revive:
+      rules:
+        - name: blank-imports
+        - name: context-as-argument
+          disabled: true
+        - name: context-keys-type
+        - name: dot-imports
+        - name: error-return
+        - name: error-strings
+        - name: error-naming
+        - name: exported
+          disabled: true
+        - name: if-return
+        - name: increment-decrement
+        - name: var-naming
+        - name: var-declaration
+        - name: package-comments
+          disabled: true
+        - name: range
+        - name: receiver-naming
+        - name: time-naming
+        - name: unexported-return
+        - name: indent-error-flow
+        - name: errorf
+        - name: empty-block
+        - name: superfluous-else
+        - name: unreachable-code
+        - name: redefines-builtin-id
+          disabled: true
+    gosec:
+      excludes:
+        - G104
+        - G101
+        - G117
+        - G120
+        - G304
+  exclusions:
+    generated: lax
+    rules:
+      - path: internal/platemd/
+        linters:
+          - staticcheck
+          - revive
+          - gosec
+          - errcheck
+          - unused
+    paths:
+      - vendor
+      - third_party$
+      - builtin$
+      - examples$
+
+formatters:
+  enable:
+    - gofmt
+  exclusions:
+    paths:
+      - vendor

@@ -1,0 +1,90 @@
+version: 2
+
+project_name: pulse-import
+
+before:
+  hooks:
+    - go mod verify
+
+builds:
+  - id: pulse-import
+    main: ./cmd/pulse-import
+    binary: pulse-import
+    flags:
+      - -mod=vendor
+    ldflags:
+      - -s -w
+      - -X github.com/trypulse/pulse-import/internal/version.Version={{.Version}}
+      - -X github.com/trypulse/pulse-import/internal/version.Commit={{.ShortCommit}}
+      - -X github.com/trypulse/pulse-import/internal/version.Date={{.Date}}
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - LICENSE
+      - README.md
+      - CHANGELOG.md
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+snapshot:
+  version_template: "{{ .Version }}-next"
+
+changelog:
+  sort: asc
+  use: git
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "^ci:"
+      - "^style:"
+      - "^Merge pull request"
+      - "^Merge branch"
+  groups:
+    - title: Features
+      regexp: '^.*?feat(\(.+\))?!?:.+$'
+      order: 0
+    - title: Bug Fixes
+      regexp: '^.*?fix(\(.+\))?!?:.+$'
+      order: 1
+    - title: Others
+      order: 999
+
+release:
+  name_template: "v{{ .Version }}"
+  draft: false
+  prerelease: auto
+  make_latest: "{{ if .Prerelease }}false{{ else }}true{{ end }}"
+  footer: |
+    ## Install
+
+    ```bash
+    # Go
+    go install github.com/trypulse/pulse-import/cmd/pulse-import@v{{ .Version }}
+
+    # Or download the archive for your OS/arch from the assets below,
+    # extract, and put `pulse-import` on your PATH.
+    ```
+
+    ```bash
+    pulse-import --version
+    ```
+
+    **Checksums:** verify downloads against `checksums.txt` (SHA-256).
