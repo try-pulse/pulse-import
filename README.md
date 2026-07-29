@@ -1,10 +1,10 @@
 # pulse-import
 
-[![CI](https://github.com/try-pulse/pulse-import/actions/workflows/ci.yml/badge.svg)](https://github.com/try-pulse/pulse-import/actions/workflows/ci.yml)
+[![CI](https://github.com/try-pulse/pulse-import/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/try-pulse/pulse-import/actions/workflows/ci.yml?query=branch%3Amain)
 [![Go](https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Go Report Card](https://goreportcard.com/badge/github.com/try-pulse/pulse-import)](https://goreportcard.com/report/github.com/try-pulse/pulse-import)
-[![Latest Release](https://img.shields.io/github/v/release/try-pulse/pulse-import?include_prereleases&sort=semver)](https://github.com/try-pulse/pulse-import/releases)
+[![Latest Release](https://img.shields.io/github/v/release/try-pulse/pulse-import?sort=semver)](https://github.com/try-pulse/pulse-import/releases/latest)
+[![GHCR](https://img.shields.io/badge/GHCR-pulse--import-blue?logo=github)](https://github.com/try-pulse/pulse-import/pkgs/container/pulse-import)
 
 Import issues into [Pulse](https://trypulse.tech) from other tools.
 
