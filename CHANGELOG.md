@@ -7,14 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-30
+
+### Added
+
+- Two-phase preflight/execute pipeline with deterministic validation and final confirmation
+- Crash-safe JSONL resume journal with explicit `--adopt` and `--retry-unknown` recovery
+- Pulse API contract tests, cancellation propagation, accessible prompts, and focused Plate tests
+
 ### Changed
 
 - Rewrite README for end-user install and usage (banner, install options, mapping, no internal/dev sections)
 - Tighten GitHub repository metadata (homepage, topics, disable wiki/projects)
+- Upgrade Cobra, Huh, progressbar, maintained Go YAML, and the minimum Go patch to 1.25.8
+- Stop persisting access tokens; config now stores only API/workspace defaults
+- Stream Jira CSV rows, validate stable issue keys, and convert Main Docs before the first Pulse write
+- Make assignee, label, project, title, and Jira markup mapping deterministic and preflight-visible
+
+### Removed
+
+- Remove the insecure `--token` flag, `PULSE_API_KEY` alias, importer aliases, and legacy token-config migration
+- Remove unused estimate/result compatibility fields and obsolete single-phase dry-run implementation
 
 ### Fixed
 
 - Issue template security contact link (`try-pulse` org slug)
+- Send the required `entity_type=issue` label query to the current Pulse API
+- Return a non-zero exit for Main Doc and partial import failures
+- Avoid automatic retries after ambiguous issue creates and duplicate CLI error output
+- Report skipped CSV rows and ambiguous user/project mappings instead of silently guessing
 
 ## [0.1.2] - 2026-07-30
 

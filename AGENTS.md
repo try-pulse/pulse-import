@@ -15,6 +15,7 @@ Module: `github.com/try-pulse/pulse-import`.
 cmd/pulse-import/     # main
 internal/cli/         # cobra root, prompts, importer registry
 internal/importers/   # Importer interface + jiracsv
+internal/importstate/ # append-only crash-safe resume journal
 internal/runner/      # maps ImportResult → Pulse API (+ Main Doc)
 internal/pulseapi/    # HTTP client
 internal/auth/        # token / config file
@@ -54,10 +55,14 @@ Releases: annotated tag `vX.Y.Z` (or `vX.Y.Z-rc.1`) on `main` → `.github/workf
 
 ## Auth / API
 
-Env vars: `PULSE_ACCESS_TOKEN` (or `PULSE_API_KEY`), optional `PULSE_API_URL`, `PULSE_WORKSPACE_ID`.
-Default API: `https://api.trypulse.tech/api/v1`. Config file: `~/.config/pulse-import/config.yaml`.
+Env vars: `PULSE_ACCESS_TOKEN`, optional `PULSE_API_URL`, `PULSE_WORKSPACE_ID`.
+Default API: `https://api.trypulse.tech/api/v1`. Config file: `~/.config/pulse-import/config.yaml`
+stores only non-secret API/workspace defaults; tokens are accepted only from
+`PULSE_ACCESS_TOKEN` or an interactive prompt.
 
-Re-running an import creates **duplicate** issues (no server-side import id yet). Prefer `--dry-run` when testing.
+Writes use a JSONL state journal for resume. Ambiguous creates must be resolved
+with `--adopt` or explicitly retried with `--retry-unknown`; never add heuristic
+title/search deduplication.
 
 ## Out of scope for agents unless asked
 

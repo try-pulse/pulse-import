@@ -25,6 +25,7 @@ coordinate disclosure once a fix is available.
 
 ## Scope notes for this CLI
 
-- Treat `PULSE_ACCESS_TOKEN` / `PULSE_API_KEY` as secrets. Never commit them.
-- Config may be written to `~/.config/pulse-import/config.yaml` — protect that file.
+- Treat `PULSE_ACCESS_TOKEN` as a secret. Never commit it.
+- Config may be written to `~/.config/pulse-import/config.yaml`; it contains no token and is created with mode `0600`.
+- Resume journals are created with mode `0600` and contain source/target identifiers, but no credentials.
 - Imports create real Pulse issues; prefer `--dry-run` when testing against shared workspaces.
