@@ -3,9 +3,11 @@ package pulseapi_test
 import (
 	"context"
 	"encoding/json"
-	"io"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -14,12 +16,22 @@ import (
 	"github.com/try-pulse/pulse-import/internal/pulseapi"
 )
 
+func mustClient(t testing.TB, baseURL, token, workspaceID string) *pulseapi.Client {
+	t.Helper()
+	client, err := pulseapi.New(baseURL, token, workspaceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return client
+}
+
 func TestClient_HeadersAndMe(t *testing.T) {
 	t.Parallel()
-	var gotAuth, gotWS string
+	var gotAuth, gotWS, gotUserAgent string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
 		gotWS = r.Header.Get("X-Workspace-ID")
+		gotUserAgent = r.Header.Get("User-Agent")
 		switch r.URL.Path {
 		case "/auth/me":
 			_ = json.NewEncoder(w).Encode(map[string]any{
@@ -31,7 +43,7 @@ func TestClient_HeadersAndMe(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	c := pulseapi.New(srv.URL, "tok123", "ws-9")
+	c := mustClient(t, srv.URL, "tok123", "ws-9")
 	me, err := c.Me(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -45,6 +57,9 @@ func TestClient_HeadersAndMe(t *testing.T) {
 	if gotWS != "ws-9" {
 		t.Fatalf("workspace=%q", gotWS)
 	}
+	if !strings.HasPrefix(gotUserAgent, "pulse-import/") {
+		t.Fatalf("user-agent=%q", gotUserAgent)
+	}
 	if c.HTTP.Timeout == 0 {
 		t.Fatal("expected default timeout")
 	}
@@ -57,7 +72,7 @@ func TestClient_MeRequiresWrappedUser(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	_, err := pulseapi.New(srv.URL, "t", "").Me(context.Background())
+	_, err := mustClient(t, srv.URL, "t", "").Me(context.Background())
 	if err == nil {
 		t.Fatal("expected empty-user error for bare payload")
 	}
@@ -71,7 +86,7 @@ func TestClient_APIError(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	c := pulseapi.New(srv.URL, "bad", "ws")
+	c := mustClient(t, srv.URL, "bad", "ws")
 	_, err := c.Me(context.Background())
 	if err == nil {
 		t.Fatal("expected error")
@@ -117,7 +132,7 @@ func TestClient_CreateIssueAndUpload(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	c := pulseapi.New(srv.URL, "tok", "ws")
+	c := mustClient(t, srv.URL, "tok", "ws")
 	issue, err := c.CreateIssue(context.Background(), pulseapi.CreateIssueRequest{
 		Title:    "T",
 		TeamID:   "team1",
@@ -157,7 +172,7 @@ func TestClient_UploadRequiresID(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	_, err := pulseapi.New(srv.URL, "tok", "ws").UploadMainDoc(context.Background(), "iss1", "T", []byte(`[]`))
+	_, err := mustClient(t, srv.URL, "tok", "ws").UploadMainDoc(context.Background(), "iss1", "T", []byte(`[]`))
 	if err == nil || !strings.Contains(err.Error(), "missing document id") {
 		t.Fatalf("err=%v", err)
 	}
@@ -184,36 +199,13 @@ func TestClient_ListPagination(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	c := pulseapi.New(srv.URL, "tok", "ws")
+	c := mustClient(t, srv.URL, "tok", "ws")
 	teams, err := c.ListTeams(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(teams) != 101 {
 		t.Fatalf("got %d teams", len(teams))
-	}
-}
-
-func TestClient_CreateTeamWrapped(t *testing.T) {
-	t.Parallel()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		if !strings.Contains(string(body), `"icon_code"`) {
-			t.Errorf("missing icon defaults: %s", body)
-		}
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"team": pulseapi.Team{ID: "t1", Name: "Jira"},
-		})
-	}))
-	t.Cleanup(srv.Close)
-
-	c := pulseapi.New(srv.URL, "tok", "ws")
-	team, err := c.CreateTeam(context.Background(), "Jira")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if team.ID != "t1" {
-		t.Fatalf("%+v", team)
 	}
 }
 
@@ -237,6 +229,11 @@ func TestClient_ListEndpointsAndLabel(t *testing.T) {
 				"data": []pulseapi.Project{{ID: "p1", Name: "App", TeamID: "t1"}},
 			})
 		case r.URL.Path == "/teams/t1/labels" && r.Method == http.MethodGet:
+			if r.URL.Query().Get("entity_type") != "issue" || r.URL.Query().Get("archived") != "false" {
+				t.Errorf("label query = %s", r.URL.RawQuery)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"data": []pulseapi.Label{{ID: "l1", Name: "bug", EntityType: "issue"}},
 			})
@@ -248,7 +245,7 @@ func TestClient_ListEndpointsAndLabel(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	c := pulseapi.New(srv.URL, "tok", "ws")
+	c := mustClient(t, srv.URL, "tok", "ws")
 	ctx := context.Background()
 
 	ws, err := c.ListMyWorkspaces(ctx)
@@ -275,6 +272,48 @@ func TestClient_ListEndpointsAndLabel(t *testing.T) {
 	}
 }
 
+func TestClient_GetIssue(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/issues/issue-1" || r.Method != http.MethodGet {
+			http.NotFound(w, r)
+			return
+		}
+		docID := "doc-1"
+		_ = json.NewEncoder(w).Encode(pulseapi.Issue{
+			ID: "issue-1", TeamID: "team-1", MainDocID: &docID,
+		})
+	}))
+	t.Cleanup(srv.Close)
+	issue, err := mustClient(t, srv.URL, "token", "workspace").GetIssue(context.Background(), "issue-1")
+	if err != nil || issue.MainDocID == nil || *issue.MainDocID != "doc-1" {
+		t.Fatalf("issue=%+v err=%v", issue, err)
+	}
+}
+
+func TestClient_InvalidBaseURLAndBoundedError(t *testing.T) {
+	t.Parallel()
+	if _, err := pulseapi.New("ftp://example.com", "token", ""); err == nil {
+		t.Fatal("expected invalid URL error")
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte(strings.Repeat("x", 80<<10)))
+	}))
+	t.Cleanup(srv.Close)
+	client := mustClient(t, srv.URL, "token", "")
+	client.Backoff = func(int) time.Duration { return 0 }
+	_, err := client.Me(context.Background())
+	var apiErr *pulseapi.APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("err=%T %v", err, err)
+	}
+	if len(apiErr.Body) > (65<<10) || !strings.Contains(apiErr.Body, "truncated") {
+		t.Fatalf("error body length=%d", len(apiErr.Body))
+	}
+}
+
 func TestClient_ListLabelsRequiresEnvelope(t *testing.T) {
 	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -282,7 +321,7 @@ func TestClient_ListLabelsRequiresEnvelope(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	_, err := pulseapi.New(srv.URL, "t", "w").ListLabels(context.Background(), "t1")
+	_, err := mustClient(t, srv.URL, "t", "w").ListLabels(context.Background(), "t1")
 	if err == nil {
 		t.Fatal("expected decode failure for bare array")
 	}
@@ -321,7 +360,7 @@ func TestClient_UploadContentWrapAndSanitize(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	c := pulseapi.New(srv.URL, "tok", "ws")
+	c := mustClient(t, srv.URL, "tok", "ws")
 	issue, err := c.CreateIssue(context.Background(), pulseapi.CreateIssueRequest{Title: "T", TeamID: "t"})
 	if err != nil || issue.ID != "i9" {
 		t.Fatalf("%v %v", issue, err)
@@ -351,7 +390,7 @@ func TestClient_RateLimitRetry(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	c := pulseapi.New(srv.URL, "tok", "ws")
+	c := mustClient(t, srv.URL, "tok", "ws")
 	c.Backoff = func(int) time.Duration { return 0 }
 
 	issue, err := c.CreateIssue(context.Background(), pulseapi.CreateIssueRequest{Title: "T", TeamID: "team1"})
@@ -363,5 +402,125 @@ func TestClient_RateLimitRetry(t *testing.T) {
 	}
 	if hits.Load() < 2 {
 		t.Fatalf("expected retry, hits=%d", hits.Load())
+	}
+}
+
+func TestClient_WriteDoesNotRetryServerError(t *testing.T) {
+	t.Parallel()
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte(`{"message":"upstream failed"}`))
+	}))
+	t.Cleanup(srv.Close)
+	client := mustClient(t, srv.URL, "token", "workspace")
+	client.Backoff = func(int) time.Duration { return 0 }
+	_, err := client.CreateIssue(context.Background(), pulseapi.CreateIssueRequest{Title: "Valid", TeamID: "team"})
+	if err == nil || hits.Load() != 1 {
+		t.Fatalf("err=%v hits=%d", err, hits.Load())
+	}
+	if !pulseapi.IsAmbiguousWriteError(err) {
+		t.Fatal("500 write must be classified as ambiguous")
+	}
+}
+
+func TestClient_ReadRetriesServerError(t *testing.T) {
+	t.Parallel()
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if hits.Add(1) == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(pulseapi.Issue{ID: "issue-1", TeamID: "team"})
+	}))
+	t.Cleanup(srv.Close)
+	client := mustClient(t, srv.URL, "token", "workspace")
+	client.Backoff = func(int) time.Duration { return 0 }
+	issue, err := client.GetIssue(context.Background(), "issue-1")
+	if err != nil || issue.ID != "issue-1" || hits.Load() != 2 {
+		t.Fatalf("issue=%+v err=%v hits=%d", issue, err, hits.Load())
+	}
+}
+
+func TestAmbiguousWriteClassification(t *testing.T) {
+	t.Parallel()
+	if pulseapi.IsAmbiguousWriteError(&pulseapi.APIError{Status: http.StatusBadRequest}) {
+		t.Fatal("400 is definitive")
+	}
+	if !pulseapi.IsAmbiguousWriteError(errors.New("connection reset")) {
+		t.Fatal("network error is ambiguous")
+	}
+	if pulseapi.IsAmbiguousWriteError(nil) {
+		t.Fatal("nil error is not ambiguous")
+	}
+}
+
+func TestCurrentPulseAPIContractFixtures(t *testing.T) {
+	t.Parallel()
+	data, err := os.ReadFile(filepath.Join("testdata", "contracts.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fixtures map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fixtures); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		key := ""
+		switch r.URL.Path {
+		case "/auth/me":
+			key = "auth_me"
+		case "/workspaces/me":
+			key = "workspaces"
+		case "/teams":
+			key = "teams"
+		case "/projects":
+			key = "projects"
+		case "/users":
+			key = "users"
+		case "/teams/team-1/labels":
+			key = "labels"
+		case "/issues", "/issues/issue-1":
+			key = "issue"
+		case "/content/documents/upload":
+			key = "document"
+		default:
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(fixtures[key])
+	}))
+	t.Cleanup(server.Close)
+	client := mustClient(t, server.URL, "token", "workspace-1")
+	ctx := context.Background()
+	if user, err := client.Me(ctx); err != nil || user.ID != "user-1" {
+		t.Fatalf("user=%+v err=%v", user, err)
+	}
+	if workspaces, err := client.ListMyWorkspaces(ctx); err != nil || len(workspaces) != 1 {
+		t.Fatalf("workspaces=%+v err=%v", workspaces, err)
+	}
+	if teams, err := client.ListTeams(ctx); err != nil || len(teams) != 1 {
+		t.Fatalf("teams=%+v err=%v", teams, err)
+	}
+	if projects, err := client.ListProjects(ctx); err != nil || len(projects) != 1 {
+		t.Fatalf("projects=%+v err=%v", projects, err)
+	}
+	if users, err := client.ListUsers(ctx); err != nil || len(users) != 1 {
+		t.Fatalf("users=%+v err=%v", users, err)
+	}
+	if labels, err := client.ListLabels(ctx, "team-1"); err != nil || len(labels) != 1 {
+		t.Fatalf("labels=%+v err=%v", labels, err)
+	}
+	if issue, err := client.CreateIssue(ctx, pulseapi.CreateIssueRequest{Title: "Fix login", TeamID: "team-1"}); err != nil || issue.ID != "issue-1" {
+		t.Fatalf("issue=%+v err=%v", issue, err)
+	}
+	if issue, err := client.GetIssue(ctx, "issue-1"); err != nil || issue.ID != "issue-1" {
+		t.Fatalf("issue=%+v err=%v", issue, err)
+	}
+	if document, err := client.UploadMainDoc(ctx, "issue-1", "Fix login", []byte(`[]`)); err != nil || document.ID != "document-1" {
+		t.Fatalf("document=%+v err=%v", document, err)
 	}
 }

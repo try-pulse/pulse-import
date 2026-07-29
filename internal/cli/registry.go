@@ -8,18 +8,16 @@ import (
 )
 
 type registration struct {
-	ID      string
-	Aliases []string
-	Label   string
-	New     func(opts Options, p Prompter) (importers.Importer, error)
+	ID    string
+	Label string
+	New   func(opts Options, p Prompter) (importers.Importer, error)
 }
 
 var registry = []registration{
 	{
-		ID:      "jira-csv",
-		Aliases: []string{"jira", "jiraCsv"},
-		Label:   "Jira (CSV export)",
-		New:     newJiraCSV,
+		ID:    "jira-csv",
+		Label: "Jira (CSV export)",
+		New:   newJiraCSV,
 	},
 }
 
@@ -28,11 +26,6 @@ func lookupImporter(id string) (*registration, error) {
 		r := &registry[i]
 		if r.ID == id {
 			return r, nil
-		}
-		for _, a := range r.Aliases {
-			if a == id {
-				return r, nil
-			}
 		}
 	}
 	ids := make([]string, len(registry))

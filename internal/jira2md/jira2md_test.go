@@ -56,6 +56,17 @@ func TestConvert(t *testing.T) {
 			in:   "h1. A\r\n*b*",
 			want: []string{"# A", "**b**"},
 		},
+		{
+			name: "code content is never rewritten",
+			in:   "{code}\nh1. not a heading\n*not bold*\n[not|a-link]\n{code}\nh2. Real",
+			want: []string{"h1. not a heading", "*not bold*", "[not|a-link]", "## Real"},
+			deny: []string{"# not a heading", "**not bold**"},
+		},
+		{
+			name: "wiki markers without headings",
+			in:   "* one\n* two\n{{inline}}\n*bold*",
+			want: []string{"- one", "- two", "`inline`", "**bold**"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -80,4 +91,18 @@ func TestConvert(t *testing.T) {
 			}
 		})
 	}
+}
+
+func FuzzConvert(f *testing.F) {
+	for _, seed := range []string{
+		"", "plain text", "h1. Jira\n* item", "{code}\n*raw*\n{code}", "{panel}note{panel}",
+	} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, input string) {
+		output := jira2md.Convert(input)
+		if strings.ContainsRune(output, '\r') {
+			t.Fatal("output contains unnormalized carriage return")
+		}
+	})
 }

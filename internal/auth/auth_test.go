@@ -3,65 +3,20 @@ package auth_test
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/try-pulse/pulse-import/internal/auth"
 )
 
-func TestResolveToken_EnvPrecedence(t *testing.T) {
-	t.Setenv(auth.EnvAccessToken, "")
-	t.Setenv(auth.EnvAPIKey, "")
-
-	tests := []struct {
-		name    string
-		access  string
-		apiKey  string
-		cfg     *auth.Config
-		want    string
-		wantErr bool
-	}{
-		{
-			name:   "access token wins",
-			access: " tok-a ",
-			apiKey: "tok-b",
-			cfg:    &auth.Config{AccessToken: "tok-cfg"},
-			want:   "tok-a",
-		},
-		{
-			name:   "api key when access empty",
-			apiKey: "tok-b",
-			cfg:    &auth.Config{AccessToken: "tok-cfg"},
-			want:   "tok-b",
-		},
-		{
-			name: "config when env empty",
-			cfg:  &auth.Config{AccessToken: " tok-cfg "},
-			want: "tok-cfg",
-		},
-		{
-			name:    "noninteractive missing",
-			wantErr: true,
-		},
+func TestAccessToken(t *testing.T) {
+	t.Setenv(auth.EnvAccessToken, " env-access ")
+	if got := auth.AccessToken(); got != "env-access" {
+		t.Fatalf("access token = %q", got)
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Setenv(auth.EnvAccessToken, tt.access)
-			t.Setenv(auth.EnvAPIKey, tt.apiKey)
-			got, err := auth.ResolveToken(tt.cfg, true)
-			if tt.wantErr {
-				if err == nil {
-					t.Fatal("expected error")
-				}
-				return
-			}
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got != tt.want {
-				t.Fatalf("got %q want %q", got, tt.want)
-			}
-		})
+	t.Setenv(auth.EnvAccessToken, "")
+	if got := auth.AccessToken(); got != "" {
+		t.Fatalf("missing token = %q", got)
 	}
 }
 
@@ -76,34 +31,70 @@ func TestDefaultAPIURL(t *testing.T) {
 	}
 }
 
-func TestSaveLoadRoundTrip(t *testing.T) {
+func TestSaveLoadRoundTripHasNoSecret(t *testing.T) {
 	dir := t.TempDir()
 	auth.SetUserConfigDirForTest(func() (string, error) { return dir, nil })
 	t.Cleanup(auth.ResetUserConfigDirForTest)
 
-	cfg := &auth.Config{
-		AccessToken: "secret",
-		APIURL:      "https://api.example.com/api/v1",
-		WorkspaceID: "ws1",
-	}
+	cfg := &auth.Config{APIURL: "https://api.example.com/api/v1", WorkspaceID: "ws1"}
 	if err := auth.Save(cfg); err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(dir, "pulse-import", "config.yaml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "token") {
+		t.Fatalf("config contains token field: %s", data)
+	}
 	info, err := os.Stat(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if perm := info.Mode().Perm(); perm&0o022 != 0 {
-		t.Fatalf("config should not be group/world writable: %v", perm)
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("config mode = %o", info.Mode().Perm())
 	}
 
 	loaded, err := auth.Load()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.AccessToken != "secret" || loaded.WorkspaceID != "ws1" {
+	if loaded.APIURL != cfg.APIURL || loaded.WorkspaceID != "ws1" {
 		t.Fatalf("loaded %+v", loaded)
+	}
+}
+
+func TestLoadRejectsUnknownFields(t *testing.T) {
+	dir := t.TempDir()
+	auth.SetUserConfigDirForTest(func() (string, error) { return dir, nil })
+	t.Cleanup(auth.ResetUserConfigDirForTest)
+	configDir := filepath.Join(dir, "pulse-import")
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte("access_token: forbidden\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := auth.Load(); err == nil || !strings.Contains(err.Error(), "field access_token") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestLoadRejectsMultipleDocuments(t *testing.T) {
+	dir := t.TempDir()
+	auth.SetUserConfigDirForTest(func() (string, error) { return dir, nil })
+	t.Cleanup(auth.ResetUserConfigDirForTest)
+	configDir := filepath.Join(dir, "pulse-import")
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	data := []byte("workspace_id: ws1\n---\nworkspace_id: ws2\n")
+	if err := os.WriteFile(filepath.Join(configDir, "config.yaml"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := auth.Load(); err == nil || !strings.Contains(err.Error(), "multiple YAML documents") {
+		t.Fatalf("err = %v", err)
 	}
 }
 
@@ -111,12 +102,8 @@ func TestLoadMissingFile(t *testing.T) {
 	dir := t.TempDir()
 	auth.SetUserConfigDirForTest(func() (string, error) { return dir, nil })
 	t.Cleanup(auth.ResetUserConfigDirForTest)
-
 	cfg, err := auth.Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.AccessToken != "" {
-		t.Fatalf("expected empty config, got %+v", cfg)
+	if err != nil || cfg.WorkspaceID != "" {
+		t.Fatalf("cfg=%+v err=%v", cfg, err)
 	}
 }

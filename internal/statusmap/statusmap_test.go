@@ -54,9 +54,11 @@ func TestMapPriority(t *testing.T) {
 		{"Blocker", importers.PriorityUrgent},
 		{"Critical", importers.PriorityUrgent},
 		{"High", importers.PriorityHigh},
+		{"Major", importers.PriorityHigh},
 		{"Medium", importers.PriorityMedium},
 		{"Normal", importers.PriorityMedium},
 		{"Low", importers.PriorityLow},
+		{"Minor", importers.PriorityLow},
 		{"Lowest", importers.PriorityNoPriority},
 		{"Trivial", importers.PriorityNoPriority},
 		{"", importers.PriorityNoPriority},
@@ -88,7 +90,7 @@ func TestMapIssueType(t *testing.T) {
 		{"Enhancement", importers.TypeFeature, "Type: Enhancement"},
 		{"Task", importers.TypeTask, "Type: Task"},
 		{"Sub-task", importers.TypeTask, "Type: Sub-task"},
-		{"Epic", importers.TypeTask, "Type: Epic"},
+		{"Epic", importers.TypeFeature, "Type: Epic"},
 		{"", importers.TypeTask, ""},
 	}
 	for _, tt := range tests {

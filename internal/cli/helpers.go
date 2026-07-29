@@ -2,32 +2,32 @@ package cli
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 
-	"github.com/charmbracelet/huh"
+	"charm.land/huh/v2"
 	"github.com/try-pulse/pulse-import/internal/pulseapi"
 	"github.com/try-pulse/pulse-import/internal/runner"
 )
 
 type Options struct {
-	APIURL     string
-	Token      string
-	Workspace  string
-	Importer   string
-	File       string
-	Team       string
-	Project    string
-	JiraURL    string
-	SelfAssign bool
-	DryRun     bool
-	Continue   bool
-	NoPrompt   bool
+	APIURL       string
+	Workspace    string
+	Importer     string
+	File         string
+	Team         string
+	Project      string
+	JiraURL      string
+	SelfAssign   bool
+	DryRun       bool
+	Continue     bool
+	NoPrompt     bool
+	StateFile    string
+	Adopt        []string
+	RetryUnknown []string
 }
-
-var jiraCloudRE = regexp.MustCompile(`(?i)^https?://([^\./]+)\.atlassian\.net`)
 
 func displayUser(u *pulseapi.User) string {
 	if u.DisplayName != "" {
@@ -66,15 +66,6 @@ func absExisting(path string) (string, error) {
 	return filepath.Abs(path)
 }
 
-func findTeam(teams []pulseapi.Team, q string) *pulseapi.Team {
-	for i := range teams {
-		if teams[i].ID == q || strings.EqualFold(teams[i].Name, q) {
-			return &teams[i]
-		}
-	}
-	return nil
-}
-
 func resolveJiraURLs(jiraURL string, p Prompter) (site, custom string, err error) {
 	jiraURL = strings.TrimSpace(jiraURL)
 	if jiraURL == "" {
@@ -84,7 +75,8 @@ func resolveJiraURLs(jiraURL string, p Prompter) (site, custom string, err error
 		}
 		if isCloud {
 			jiraURL, err = p.Input("Jira Cloud URL", "https://acme.atlassian.net", func(s string) error {
-				if !jiraCloudRE.MatchString(strings.TrimSpace(s)) {
+				parsedSite, _, parseErr := parseJiraURL(s)
+				if parseErr != nil || parsedSite == "" {
 					return fmt.Errorf("expected https://<site>.atlassian.net")
 				}
 				return nil
@@ -96,14 +88,70 @@ func resolveJiraURLs(jiraURL string, p Prompter) (site, custom string, err error
 			return "", "", err
 		}
 	}
-	jiraURL = strings.TrimSpace(jiraURL)
-	if m := jiraCloudRE.FindStringSubmatch(jiraURL); len(m) == 2 {
-		return m[1], "", nil
+	return parseJiraURL(jiraURL)
+}
+
+func parseJiraURL(raw string) (site, custom string, err error) {
+	raw = strings.TrimSpace(raw)
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return "", "", fmt.Errorf("invalid Jira URL: %w", err)
 	}
-	if jiraURL != "" {
-		return "", strings.TrimRight(jiraURL, "/"), nil
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return "", "", fmt.Errorf("invalid Jira URL: scheme must be http or https")
 	}
-	return "", "", nil
+	if parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", "", fmt.Errorf("invalid Jira URL: host is required; credentials, query and fragment are not allowed")
+	}
+	host := strings.ToLower(parsed.Hostname())
+	if strings.HasSuffix(host, ".atlassian.net") {
+		site = strings.TrimSuffix(host, ".atlassian.net")
+		if site == "" || strings.Contains(site, ".") {
+			return "", "", fmt.Errorf("invalid Jira Cloud host %q", host)
+		}
+		return site, "", nil
+	}
+	parsed.Scheme = strings.ToLower(parsed.Scheme)
+	parsed.Host = strings.ToLower(parsed.Host)
+	parsed.Path = strings.TrimRight(parsed.Path, "/")
+	parsed.RawPath = strings.TrimRight(parsed.RawPath, "/")
+	return "", strings.TrimRight(parsed.String(), "/"), nil
+}
+
+func parseKeyValues(values []string, flagName string) (map[string]string, error) {
+	out := map[string]string{}
+	for _, value := range values {
+		key, target, ok := strings.Cut(value, "=")
+		key, target = strings.TrimSpace(key), strings.TrimSpace(target)
+		if !ok || key == "" || target == "" {
+			return nil, fmt.Errorf("%s expects JIRA-KEY=PULSE-ISSUE-ID, got %q", flagName, value)
+		}
+		folded := strings.ToLower(key)
+		if _, exists := out[folded]; exists {
+			return nil, fmt.Errorf("%s repeats Jira key %q", flagName, key)
+		}
+		out[folded] = target
+	}
+	return out, nil
+}
+
+func parseKeys(values []string) (map[string]bool, error) {
+	out := map[string]bool{}
+	for _, value := range values {
+		key := strings.ToLower(strings.TrimSpace(value))
+		if key == "" {
+			return nil, fmt.Errorf("--retry-unknown requires a Jira key")
+		}
+		if out[key] {
+			return nil, fmt.Errorf("--retry-unknown repeats Jira key %q", value)
+		}
+		out[key] = true
+	}
+	return out, nil
+}
+
+func defaultStatePath(sourcePath string) string {
+	return sourcePath + ".pulse-import.state.jsonl"
 }
 
 func workspaceOptions(memberships []pulseapi.WorkspaceMembership) []huh.Option[string] {

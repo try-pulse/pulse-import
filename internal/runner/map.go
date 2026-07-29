@@ -1,12 +1,13 @@
 package runner
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"strings"
 	"unicode/utf8"
 
 	"github.com/try-pulse/pulse-import/internal/importers"
 	"github.com/try-pulse/pulse-import/internal/pulseapi"
-	"github.com/try-pulse/pulse-import/internal/statusmap"
 )
 
 type AssigneeMode string
@@ -18,97 +19,106 @@ const (
 )
 
 type userIndex struct {
-	byName  map[string]string
-	byEmail map[string]string
+	byName  map[string][]string
+	byEmail map[string][]string
 }
 
 func indexUsers(users []pulseapi.User) userIndex {
-	idx := userIndex{byName: map[string]string{}, byEmail: map[string]string{}}
-	for _, u := range users {
-		if u.DisplayName != "" {
-			idx.byName[strings.ToLower(u.DisplayName)] = u.ID
-		}
-		full := strings.TrimSpace(u.FirstName + " " + u.LastName)
-		if full != "" {
-			idx.byName[strings.ToLower(full)] = u.ID
-		}
-		if u.Email != "" {
-			idx.byEmail[strings.ToLower(u.Email)] = u.ID
-		}
+	index := userIndex{byName: map[string][]string{}, byEmail: map[string][]string{}}
+	for _, user := range users {
+		addUnique(index.byName, user.DisplayName, user.ID)
+		addUnique(index.byName, strings.TrimSpace(user.FirstName+" "+user.LastName), user.ID)
+		addUnique(index.byEmail, user.Email, user.ID)
 	}
-	return idx
+	return index
 }
 
-type mapping struct {
-	teamID       string
-	projectID    string
-	assignee     AssigneeMode
-	selfUserID   string
-	users        userIndex
-	labelMapping map[string]string
+func addUnique(index map[string][]string, key, id string) {
+	key = strings.ToLower(strings.TrimSpace(key))
+	if key == "" || id == "" {
+		return
+	}
+	for _, existing := range index[key] {
+		if existing == id {
+			return
+		}
+	}
+	index[key] = append(index[key], id)
 }
 
-func (m mapping) request(issue importers.Issue) pulseapi.CreateIssueRequest {
-	title := strings.TrimSpace(issue.Title)
-	if title == "" {
-		title = "Untitled"
-	}
-	title = truncateRunes(title, 200)
-
-	var labelIDs []string
-	seen := map[string]bool{}
-	for _, k := range issue.Labels {
-		id := m.labelMapping[k]
-		if id == "" || seen[id] {
-			continue
-		}
-		seen[id] = true
-		labelIDs = append(labelIDs, id)
-		if len(labelIDs) >= 10 {
-			break
-		}
-	}
-
-	var assigneeID *string
-	switch m.assignee {
+func resolveAssignee(
+	mode AssigneeMode,
+	selfUserID string,
+	issue importers.Issue,
+	sourceUsers map[string]importers.User,
+	users userIndex,
+) (id *string, state string) {
+	switch mode {
 	case AssigneeSelf:
-		if m.selfUserID != "" {
-			assigneeID = &m.selfUserID
+		if selfUserID == "" {
+			return nil, "unmatched"
 		}
+		return stringPointer(selfUserID), "matched"
+	case AssigneeNone:
+		return nil, "none"
 	case AssigneeMapped:
-		if issue.AssigneeID != "" {
-			key := strings.ToLower(issue.AssigneeID)
-			if id, ok := m.users.byEmail[key]; ok {
-				assigneeID = &id
-			} else if id, ok := m.users.byName[key]; ok {
-				assigneeID = &id
-			}
+	default:
+		return nil, "none"
+	}
+	sourceKey := strings.ToLower(strings.TrimSpace(issue.AssigneeID))
+	if sourceKey == "" {
+		return nil, "none"
+	}
+	sourceUser := sourceUsers[sourceKey]
+	email := strings.TrimSpace(issue.AssigneeEmail)
+	if email == "" {
+		email = strings.TrimSpace(sourceUser.Email)
+	}
+	if email == "" && strings.Contains(sourceKey, "@") {
+		email = sourceKey
+	}
+	if email != "" {
+		switch matches := users.byEmail[strings.ToLower(email)]; len(matches) {
+		case 1:
+			return stringPointer(matches[0]), "matched"
+		case 0:
+		default:
+			return nil, "ambiguous"
 		}
 	}
-
-	var projectID *string
-	if m.projectID != "" {
-		projectID = &m.projectID
+	name := strings.TrimSpace(sourceUser.Name)
+	if name == "" {
+		name = issue.AssigneeID
 	}
-
-	return pulseapi.CreateIssueRequest{
-		Title:        title,
-		Status:       string(statusmap.Map(issue.Status)),
-		Priority:     string(issue.Priority),
-		Type:         string(issue.Type),
-		TeamID:       m.teamID,
-		ProjectID:    projectID,
-		AssigneeID:   assigneeID,
-		LabelIDs:     labelIDs,
-		TimeEstimate: issue.Estimate,
+	switch matches := users.byName[strings.ToLower(name)]; len(matches) {
+	case 1:
+		return stringPointer(matches[0]), "matched"
+	case 0:
+		return nil, "unmatched"
+	default:
+		return nil, "ambiguous"
 	}
 }
 
-func truncateRunes(s string, n int) string {
-	if utf8.RuneCountInString(s) <= n {
-		return s
+func stringPointer(value string) *string {
+	return &value
+}
+
+func normalizeLabelName(name string) (normalized string, changed bool) {
+	name = strings.TrimSpace(name)
+	if utf8.RuneCountInString(name) <= 50 {
+		return name, false
 	}
-	return string([]rune(s)[:n])
+	sum := sha256.Sum256([]byte(name))
+	suffix := "-" + hex.EncodeToString(sum[:4])
+	return string([]rune(name)[:50-len([]rune(suffix))]) + suffix, true
+}
+
+func truncateRunes(value string, max int) string {
+	if utf8.RuneCountInString(value) <= max {
+		return value
+	}
+	return string([]rune(value)[:max])
 }
 
 func pickColor(name string) string {
@@ -116,9 +126,9 @@ func pickColor(name string) string {
 		"#EB5757", "#F2C94C", "#27AE60", "#2D9CDB", "#9B51E0",
 		"#F2994A", "#56CCF2", "#6FCF97", "#BB6BD9", "#828282",
 	}
-	h := 0
+	hash := 0
 	for _, r := range name {
-		h = (h*31 + int(r)) % len(palette)
+		hash = (hash*31 + int(r)) % len(palette)
 	}
-	return palette[h]
+	return palette[hash]
 }

@@ -1,24 +1,23 @@
 package auth
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 
-	"github.com/charmbracelet/huh"
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v3"
 )
 
 const (
 	EnvAccessToken = "PULSE_ACCESS_TOKEN"
-	EnvAPIKey      = "PULSE_API_KEY"
 	EnvAPIURL      = "PULSE_API_URL"
 	EnvWorkspace   = "PULSE_WORKSPACE_ID"
 )
 
 type Config struct {
-	AccessToken string `yaml:"access_token,omitempty"`
 	APIURL      string `yaml:"api_url,omitempty"`
 	WorkspaceID string `yaml:"workspace_id,omitempty"`
 }
@@ -51,13 +50,39 @@ func Load() (*Config, error) {
 		if os.IsNotExist(err) {
 			return &Config{}, nil
 		}
-		return nil, err
+		return nil, fmt.Errorf("read config: %w", err)
 	}
+
 	var cfg Config
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return nil, fmt.Errorf("parse config: multiple YAML documents are not allowed")
+		}
+		return nil, fmt.Errorf("parse config: %w", err)
+	}
+	if err := secureExistingPath(path); err != nil {
+		return nil, err
+	}
+	cfg.APIURL = strings.TrimSpace(cfg.APIURL)
+	cfg.WorkspaceID = strings.TrimSpace(cfg.WorkspaceID)
 	return &cfg, nil
+}
+
+func secureExistingPath(path string) error {
+	// #nosec G302 -- a private directory needs owner execute permission.
+	if err := os.Chmod(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("secure config directory: %w", err)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		return fmt.Errorf("secure config file: %w", err)
+	}
+	return nil
 }
 
 func ConfigPathHint() string {
@@ -69,63 +94,63 @@ func ConfigPathHint() string {
 }
 
 func Save(cfg *Config) error {
+	if cfg == nil {
+		return fmt.Errorf("config is nil")
+	}
 	path, err := configPath()
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	data, err := yaml.Marshal(cfg)
+	// #nosec G302 -- a private directory needs owner execute permission.
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return err
+	}
+
+	data, err := yaml.Marshal(Config{
+		APIURL:      strings.TrimSpace(cfg.APIURL),
+		WorkspaceID: strings.TrimSpace(cfg.WorkspaceID),
+	})
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o600)
+	tmp, err := os.CreateTemp(dir, ".config-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	cleanup := func() {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+	}
+	if err := tmp.Chmod(0o600); err != nil {
+		cleanup()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		cleanup()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		cleanup()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	return os.Chmod(path, 0o600)
 }
 
-func ResolveToken(cfg *Config, nonInteractive bool) (string, error) {
-	if v := strings.TrimSpace(os.Getenv(EnvAccessToken)); v != "" {
-		return v, nil
-	}
-	if v := strings.TrimSpace(os.Getenv(EnvAPIKey)); v != "" {
-		return v, nil
-	}
-	if cfg != nil && strings.TrimSpace(cfg.AccessToken) != "" {
-		return strings.TrimSpace(cfg.AccessToken), nil
-	}
-	if nonInteractive {
-		return "", fmt.Errorf("no API token: set %s or %s", EnvAccessToken, EnvAPIKey)
-	}
-
-	var token string
-	form := huh.NewForm(
-		huh.NewGroup(
-			huh.NewInput().
-				Title("Pulse API token").
-				Description("Paste a JWT access token (same as the web app Authorization Bearer). Create a session via the Pulse app or pulse login.").
-				EchoMode(huh.EchoModePassword).
-				Value(&token).
-				Validate(func(s string) error {
-					if strings.TrimSpace(s) == "" {
-						return fmt.Errorf("token is required")
-					}
-					return nil
-				}),
-		),
-	)
-	if err := form.Run(); err != nil {
-		return "", err
-	}
-	token = strings.TrimSpace(token)
-	if cfg != nil {
-		cfg.AccessToken = token
-		if err := Save(cfg); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: could not save token to %s: %v\n", ConfigPathHint(), err)
-		} else {
-			fmt.Fprintf(os.Stderr, "saved token to %s\n", ConfigPathHint())
-		}
-	}
-	return token, nil
+func AccessToken() string {
+	return strings.TrimSpace(os.Getenv(EnvAccessToken))
 }
 
 func DefaultAPIURL() string {

@@ -1,16 +1,14 @@
 package version
 
-import (
-	"strings"
-	"testing"
-)
+import "testing"
 
-func TestStringContainsFields(t *testing.T) {
+func TestBuildContainsFields(t *testing.T) {
 	t.Parallel()
-	got := String()
-	for _, want := range []string{Version, Commit, Date} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("String()=%q missing %q", got, want)
-		}
+	version, commit, date := Build()
+	if version == "" || commit == "" || date == "" {
+		t.Fatalf("Build() = %q, %q, %q", version, commit, date)
+	}
+	if Current() != version {
+		t.Fatalf("Current() = %q, want %q", Current(), version)
 	}
 }

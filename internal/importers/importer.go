@@ -1,5 +1,7 @@
 package importers
 
+import "context"
+
 type IssuePriority string
 
 const (
@@ -20,43 +22,52 @@ const (
 )
 
 type Issue struct {
-	Title        string
-	BodyMarkdown string // Main Doc body; converted to Plate JSON via platemd
-	Status       string
-	AssigneeID   string // source-side user key (name or email)
-	Priority     IssuePriority
-	Type         IssueType
-	Labels       []string // keys into ImportResult.Labels
-	URL          string
-	Estimate     *int // hours; unused in v1 Jira CSV
+	Key           string
+	SourceRow     int
+	RowHash       string
+	Title         string
+	BodyMarkdown  string // Main Doc body; converted to Plate JSON via platemd
+	Status        string
+	AssigneeID    string // source-side user key (name or email)
+	AssigneeEmail string
+	Priority      IssuePriority
+	Type          IssueType
+	Labels        []string // keys into ImportResult.Labels
 }
 
 type User struct {
-	Name      string
-	Email     string
-	AvatarURL string
+	Name  string
+	Email string
 }
 
 type Label struct {
-	Name        string
-	Color       string
-	Description string
+	Name string
 }
 
-type StatusMeta struct {
-	Name  string
-	Color string
+type DiagnosticLevel string
+
+const (
+	DiagnosticWarning DiagnosticLevel = "warning"
+	DiagnosticError   DiagnosticLevel = "error"
+)
+
+type Diagnostic struct {
+	Level   DiagnosticLevel
+	Row     int
+	Message string
 }
 
 type ImportResult struct {
-	Issues   []Issue
-	Users    map[string]User
-	Labels   map[string]Label
-	Statuses map[string]StatusMeta
+	Issues            []Issue
+	Users             map[string]User
+	Labels            map[string]Label
+	Diagnostics       []Diagnostic
+	SourcePath        string
+	SourceURL         string
+	SourceFingerprint string
 }
 
 type Importer interface {
 	Name() string
-	DefaultTeamName() string
-	Import() (*ImportResult, error)
+	Import(context.Context) (*ImportResult, error)
 }

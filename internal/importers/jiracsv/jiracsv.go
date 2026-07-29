@@ -1,9 +1,15 @@
 package jiracsv
 
 import (
+	"context"
+	"crypto/sha256"
 	"encoding/csv"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"strings"
 
@@ -14,8 +20,8 @@ import (
 
 type Options struct {
 	FilePath     string
-	JiraSiteName string // cloud slug (acme from acme.atlassian.net)
-	CustomURL    string // on-prem base URL
+	JiraSiteName string
+	CustomURL    string
 }
 
 type Importer struct {
@@ -26,174 +32,266 @@ func New(opts Options) *Importer {
 	return &Importer{opts: opts}
 }
 
-func (i *Importer) Name() string            { return "Jira (CSV)" }
-func (i *Importer) DefaultTeamName() string { return "Jira" }
+func (i *Importer) Name() string { return "Jira (CSV)" }
 
-func (i *Importer) Import() (*importers.ImportResult, error) {
+func (i *Importer) Import(ctx context.Context) (*importers.ImportResult, error) {
 	f, err := os.Open(i.opts.FilePath)
 	if err != nil {
 		return nil, fmt.Errorf("open csv: %w", err)
 	}
 	defer func() { _ = f.Close() }()
 
-	rows, err := readCSV(f)
+	sourceHash := sha256.New()
+	cr := csv.NewReader(io.TeeReader(f, sourceHash))
+	cr.LazyQuotes = true
+
+	header, err := cr.Read()
+	if err != nil {
+		if err == io.EOF {
+			return nil, fmt.Errorf("csv is empty")
+		}
+		return nil, fmt.Errorf("read header: %w", err)
+	}
+	normalizedHeader, err := normalizeHeader(header)
 	if err != nil {
 		return nil, err
 	}
-	if len(rows) == 0 {
-		return nil, fmt.Errorf("csv is empty")
-	}
+	cr.FieldsPerRecord = -1
 
 	result := &importers.ImportResult{
-		Users:    map[string]importers.User{},
-		Labels:   map[string]importers.Label{},
-		Statuses: map[string]importers.StatusMeta{},
+		Users:      map[string]importers.User{},
+		Labels:     map[string]importers.Label{},
+		SourcePath: i.opts.FilePath,
+		SourceURL:  i.sourceURL(),
 	}
-
-	for _, row := range rows {
-		summary := row.first("summary")
-		if strings.TrimSpace(summary) == "" {
+	seenKeys := map[string]int{}
+	rowNumber := 1
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		rec, err := cr.Read()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			rowNumber++
+			var parseError *csv.ParseError
+			if errors.As(err, &parseError) {
+				rowNumber = parseError.Line
+			}
+			return nil, fmt.Errorf("read row %d: %w", rowNumber, err)
+		}
+		rowNumber, _ = cr.FieldPos(0)
+		if len(rec) < len(normalizedHeader) {
+			return nil, fmt.Errorf(
+				"read row %d: got %d fields but header has %d",
+				rowNumber, len(rec), len(normalizedHeader),
+			)
+		}
+		if len(rec) > len(normalizedHeader) {
+			for _, extra := range rec[len(normalizedHeader):] {
+				if strings.TrimSpace(extra) != "" {
+					return nil, fmt.Errorf(
+						"read row %d: got %d fields but header has %d",
+						rowNumber, len(rec), len(normalizedHeader),
+					)
+				}
+			}
+			rec = rec[:len(normalizedHeader)]
+		}
+		rw := makeRow(normalizedHeader, rec)
+		summary := strings.TrimSpace(rw.first("summary"))
+		if summary == "" {
+			result.Diagnostics = append(result.Diagnostics, importers.Diagnostic{
+				Level: importers.DiagnosticWarning, Row: rowNumber, Message: "skipped row with empty Summary",
+			})
 			continue
 		}
 
-		issueKey := row.first("issue key")
-		url := i.browseURL(issueKey)
+		issueKey := strings.TrimSpace(rw.first("issue key"))
+		if issueKey == "" {
+			result.Diagnostics = append(result.Diagnostics, importers.Diagnostic{
+				Level: importers.DiagnosticError, Row: rowNumber, Message: "Issue key is required for safe resume",
+			})
+		} else {
+			folded := strings.ToLower(issueKey)
+			if firstRow, exists := seenKeys[folded]; exists {
+				result.Diagnostics = append(result.Diagnostics, importers.Diagnostic{
+					Level: importers.DiagnosticError,
+					Row:   rowNumber,
+					Message: fmt.Sprintf(
+						"duplicate Issue key %q (first seen on row %d)", issueKey, firstRow,
+					),
+				})
+			} else {
+				seenKeys[folded] = rowNumber
+			}
+		}
 
-		md := jira2md.Convert(row.first("description"))
-		body := md
-		if url != "" {
-			link := fmt.Sprintf("[View original issue in Jira](%s)", url)
+		browseURL := i.browseURL(issueKey)
+		body := jira2md.Convert(rw.first("description"))
+		if browseURL != "" {
+			link := fmt.Sprintf("[View original issue in Jira](%s)", browseURL)
 			if body != "" {
-				body = body + "\n\n" + link
+				body += "\n\n" + link
 			} else {
 				body = link
 			}
 		}
 
-		issueType := row.first("issue type")
+		issueType := rw.first("issue type")
 		pulseType, typeLabel := statusmap.MapIssueType(issueType)
-
-		var labels []string
+		labels := make([]string, 0)
+		labelSeen := map[string]struct{}{}
 		addLabel := func(name string) {
 			name = strings.TrimSpace(name)
+			key := strings.ToLower(name)
 			if name == "" {
 				return
 			}
-			labels = append(labels, name)
-			result.Labels[name] = importers.Label{Name: name}
+			if _, exists := labelSeen[key]; exists {
+				return
+			}
+			labelSeen[key] = struct{}{}
+			labels = append(labels, key)
+			if _, exists := result.Labels[key]; !exists {
+				result.Labels[key] = importers.Label{Name: name}
+			}
 		}
-		if typeLabel != "" {
-			addLabel(typeLabel)
+		addLabel(typeLabel)
+		for _, value := range rw.all("labels") {
+			addLabel(value)
 		}
-		for _, v := range row.all("labels") {
-			addLabel(v)
-		}
-		releases := row.all("release")
+		releases := rw.all("release")
 		if len(releases) == 0 {
-			releases = row.all("fix version/s")
+			releases = rw.all("fix version/s")
 		}
 		if len(releases) == 0 {
-			releases = row.all("affects version/s")
+			releases = rw.all("affects version/s")
 		}
-		for _, rel := range releases {
-			if strings.TrimSpace(rel) != "" {
-				addLabel("Release: " + strings.TrimSpace(rel))
+		for _, release := range releases {
+			if release = strings.TrimSpace(release); release != "" {
+				addLabel("Release: " + release)
 			}
 		}
 
-		assignee := strings.TrimSpace(row.first("assignee"))
-		if assignee != "" && !strings.EqualFold(assignee, "unassigned") {
-			result.Users[assignee] = importers.User{Name: assignee}
-		} else {
+		assignee := strings.TrimSpace(rw.first("assignee"))
+		if strings.EqualFold(assignee, "unassigned") {
 			assignee = ""
 		}
-
-		status := row.first("status")
-		if status != "" {
-			result.Statuses[status] = importers.StatusMeta{Name: status}
+		assigneeEmail := ""
+		if assignee != "" {
+			assigneeEmail = firstNonEmpty(
+				rw.first("assignee email"),
+				rw.first("assignee email address"),
+			)
+			assigneeEmail = strings.TrimSpace(assigneeEmail)
+			result.Users[strings.ToLower(assignee)] = importers.User{Name: assignee, Email: assigneeEmail}
 		}
 
+		rowBytes, _ := json.Marshal(rec)
+		rowHash := sha256.Sum256(rowBytes)
 		result.Issues = append(result.Issues, importers.Issue{
-			Title:        summary,
-			BodyMarkdown: body,
-			Status:       status,
-			AssigneeID:   assignee,
-			Priority:     statusmap.MapPriority(row.first("priority")),
-			Type:         pulseType,
-			Labels:       labels,
-			URL:          url,
+			Key:           issueKey,
+			SourceRow:     rowNumber,
+			RowHash:       hex.EncodeToString(rowHash[:]),
+			Title:         summary,
+			BodyMarkdown:  body,
+			Status:        rw.first("status"),
+			AssigneeID:    assignee,
+			AssigneeEmail: assigneeEmail,
+			Priority:      statusmap.MapPriority(rw.first("priority")),
+			Type:          pulseType,
+			Labels:        labels,
 		})
 	}
-
+	if len(result.Issues) == 0 {
+		return nil, fmt.Errorf("csv contains no importable issues")
+	}
+	result.SourceFingerprint = hex.EncodeToString(sourceHash.Sum(nil))
 	return result, nil
 }
 
-func (i *Importer) browseURL(issueKey string) string {
-	if issueKey == "" {
-		return ""
+func normalizeHeader(header []string) ([]string, error) {
+	if len(header) == 0 {
+		return nil, fmt.Errorf("csv header is empty")
 	}
-	if i.opts.JiraSiteName != "" {
-		return fmt.Sprintf("https://%s.atlassian.net/browse/%s", i.opts.JiraSiteName, issueKey)
+	header[0] = strings.TrimPrefix(header[0], "\ufeff")
+	out := make([]string, len(header))
+	counts := map[string]int{}
+	allowedRepeated := map[string]bool{
+		"labels": true, "release": true, "fix version/s": true, "affects version/s": true,
 	}
-	base := strings.TrimRight(i.opts.CustomURL, "/")
-	if base == "" {
-		return ""
+	for index, raw := range header {
+		name := strings.ToLower(strings.TrimSpace(raw))
+		if name == "" {
+			return nil, fmt.Errorf("csv header column %d is empty", index+1)
+		}
+		out[index] = name
+		counts[name]++
+		if counts[name] > 1 && !allowedRepeated[name] {
+			return nil, fmt.Errorf("duplicate csv header %q", raw)
+		}
 	}
-	return base + "/browse/" + issueKey
+	if counts["summary"] == 0 {
+		return nil, fmt.Errorf(`csv is missing required "Summary" header`)
+	}
+	if counts["issue key"] == 0 {
+		return nil, fmt.Errorf(`csv is missing required "Issue key" header`)
+	}
+	return out, nil
 }
 
-// Jira repeats headers for multi-value columns.
+func (i *Importer) sourceURL() string {
+	if i.opts.JiraSiteName != "" {
+		return "https://" + strings.ToLower(i.opts.JiraSiteName) + ".atlassian.net"
+	}
+	return strings.TrimRight(i.opts.CustomURL, "/")
+}
+
+func (i *Importer) browseURL(issueKey string) string {
+	base := i.sourceURL()
+	if base == "" || issueKey == "" {
+		return ""
+	}
+	return base + "/browse/" + url.PathEscape(issueKey)
+}
+
 type row map[string][]string
 
 func (r row) first(name string) string {
-	vals := r[strings.ToLower(strings.TrimSpace(name))]
-	if len(vals) == 0 {
+	values := r[strings.ToLower(strings.TrimSpace(name))]
+	if len(values) == 0 {
 		return ""
 	}
-	return vals[0]
+	return values[0]
 }
 
 func (r row) all(name string) []string {
 	return r[strings.ToLower(strings.TrimSpace(name))]
 }
 
-func readCSV(r io.Reader) ([]row, error) {
-	cr := csv.NewReader(r)
-	cr.LazyQuotes = true
-	cr.FieldsPerRecord = -1
-
-	header, err := cr.Read()
-	if err != nil {
-		return nil, fmt.Errorf("read header: %w", err)
-	}
-	if len(header) > 0 {
-		header[0] = strings.TrimPrefix(header[0], "\ufeff")
-	}
-	for i := range header {
-		header[i] = strings.ToLower(strings.TrimSpace(header[i]))
-	}
-
-	var out []row
-	for {
-		rec, err := cr.Read()
-		if err == io.EOF {
+func makeRow(header, record []string) row {
+	rw := row{}
+	for index, name := range header {
+		if index >= len(record) {
 			break
 		}
-		if err != nil {
-			return nil, fmt.Errorf("read row: %w", err)
+		value := record[index]
+		if strings.TrimSpace(value) == "" {
+			continue
 		}
-		rw := row{}
-		for i, h := range header {
-			if h == "" || i >= len(rec) {
-				continue
-			}
-			v := rec[i]
-			if strings.TrimSpace(v) == "" {
-				continue
-			}
-			rw[h] = append(rw[h], v)
-		}
-		out = append(out, rw)
+		rw[name] = append(rw[name], value)
 	}
-	return out, nil
+	return rw
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }

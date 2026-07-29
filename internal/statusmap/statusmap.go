@@ -74,11 +74,11 @@ func MapPriority(input string) importers.IssuePriority {
 	case n == "highest" || n == "blocker" || n == "critical" ||
 		strings.Contains(n, "highest") || strings.Contains(n, "urgent") || strings.Contains(n, "critical"):
 		return importers.PriorityUrgent
-	case n == "high" || strings.Contains(n, "high"):
+	case n == "high" || n == "major" || strings.Contains(n, "high"):
 		return importers.PriorityHigh
 	case n == "medium" || n == "normal" || strings.Contains(n, "medium") || strings.Contains(n, "normal"):
 		return importers.PriorityMedium
-	case n == "low" || strings.Contains(n, "low"):
+	case n == "low" || n == "minor" || strings.Contains(n, "low"):
 		return importers.PriorityLow
 	default:
 		return importers.PriorityNoPriority
@@ -96,7 +96,7 @@ func MapIssueType(jiraType string) (importers.IssueType, string) {
 		return importers.TypeBug, label
 	case "story", "user story":
 		return importers.TypeStory, label
-	case "feature", "new feature", "improvement", "enhancement":
+	case "feature", "new feature", "improvement", "enhancement", "epic":
 		return importers.TypeFeature, label
 	case "task", "sub-task", "subtask":
 		return importers.TypeTask, label

@@ -4,43 +4,91 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/try-pulse/pulse-import/internal/version"
 )
 
-const maxAttempts = 4
+const (
+	maxAttempts      = 4
+	maxErrorBodySize = 64 << 10
+	maxRetryDelay    = 30 * time.Second
+)
 
 type Client struct {
 	BaseURL     string
 	Token       string
 	WorkspaceID string
 	HTTP        *http.Client
-	Backoff     func(attempt int) time.Duration // nil → attempt * 15s
+	Backoff     func(attempt int) time.Duration
+	UserAgent   string
 }
 
-func New(baseURL, token, workspaceID string) *Client {
+func New(baseURL, token, workspaceID string) (*Client, error) {
+	normalized, err := NormalizeBaseURL(baseURL)
+	if err != nil {
+		return nil, err
+	}
 	return &Client{
-		BaseURL:     strings.TrimRight(baseURL, "/"),
+		BaseURL:     normalized,
 		Token:       token,
 		WorkspaceID: workspaceID,
 		HTTP:        &http.Client{Timeout: 60 * time.Second},
 		Backoff: func(attempt int) time.Duration {
-			return time.Duration(attempt+1) * 15 * time.Second
+			delay := time.Second << attempt
+			if delay > maxRetryDelay {
+				return maxRetryDelay
+			}
+			return delay
 		},
+		UserAgent: "pulse-import/" + version.Current(),
+	}, nil
+}
+
+func NormalizeBaseURL(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("invalid Pulse API URL: %w", err)
 	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return "", fmt.Errorf("invalid Pulse API URL: scheme must be http or https")
+	}
+	if u.Host == "" || u.User != nil {
+		return "", fmt.Errorf("invalid Pulse API URL: host is required and credentials are not allowed")
+	}
+	if u.RawQuery != "" || u.Fragment != "" {
+		return "", fmt.Errorf("invalid Pulse API URL: query and fragment are not allowed")
+	}
+	u.Path = strings.TrimRight(u.Path, "/")
+	u.RawPath = strings.TrimRight(u.RawPath, "/")
+	return strings.TrimRight(u.String(), "/"), nil
+}
+
+func (c *Client) InsecureRemote() bool {
+	u, err := url.Parse(c.BaseURL)
+	if err != nil || u.Scheme != "http" {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	return host != "localhost" && host != "127.0.0.1" && host != "::1"
 }
 
 type APIError struct {
-	Status  int
-	Code    string
-	Message string
-	Body    string
+	Status     int
+	Code       string
+	Message    string
+	Body       string
+	RetryAfter time.Duration
 }
 
 func (e *APIError) Error() string {
@@ -48,6 +96,19 @@ func (e *APIError) Error() string {
 		return fmt.Sprintf("pulse api %d: %s", e.Status, e.Message)
 	}
 	return fmt.Sprintf("pulse api %d: %s", e.Status, e.Body)
+}
+
+// IsAmbiguousWriteError reports errors for which a POST may have reached Pulse even
+// though the client did not receive a definitive success response.
+func IsAmbiguousWriteError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.Status >= http.StatusInternalServerError
+	}
+	return true
 }
 
 func (c *Client) doRaw(ctx context.Context, method, path string, body any) ([]byte, error) {
@@ -59,20 +120,36 @@ func (c *Client) doRaw(ctx context.Context, method, path string, body any) ([]by
 		}
 		last = err
 		apiErr, ok := err.(*APIError)
-		if !ok || apiErr.Status != 429 || attempt == maxAttempts-1 {
+		retry := ok && apiErr.Status == http.StatusTooManyRequests
+		if method == http.MethodGet {
+			retry = retry || !ok || apiErr.Status >= http.StatusInternalServerError
+		}
+		if !retry || attempt == maxAttempts-1 || ctx.Err() != nil {
 			return nil, err
 		}
-		if err := c.wait(ctx, attempt); err != nil {
+		var retryAfter time.Duration
+		if ok {
+			retryAfter = apiErr.RetryAfter
+		}
+		if err := c.wait(ctx, attempt, retryAfter); err != nil {
 			return nil, err
 		}
 	}
 	return nil, last
 }
 
-func (c *Client) wait(ctx context.Context, attempt int) error {
-	d := 15 * time.Second
+func (c *Client) wait(ctx context.Context, attempt int, retryAfter time.Duration) error {
+	d := retryAfter
+	if d <= 0 {
+		d = time.Second
+	}
 	if c.Backoff != nil {
-		d = c.Backoff(attempt)
+		if fallback := c.Backoff(attempt); retryAfter <= 0 {
+			d = fallback
+		}
+	}
+	if d > maxRetryDelay {
+		d = maxRetryDelay
 	}
 	t := time.NewTimer(d)
 	defer t.Stop()
@@ -100,6 +177,9 @@ func (c *Client) roundTrip(ctx context.Context, method, path string, jsonBody an
 	}
 	req.Header.Set("Authorization", "Bearer "+c.Token)
 	req.Header.Set("Accept", "application/json")
+	if c.UserAgent != "" {
+		req.Header.Set("User-Agent", c.UserAgent)
+	}
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
 	}
@@ -112,7 +192,12 @@ func (c *Client) roundTrip(ctx context.Context, method, path string, jsonBody an
 		return nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	data, err := io.ReadAll(resp.Body)
+	var data []byte
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		data, err = readBounded(resp.Body, maxErrorBodySize)
+	} else {
+		data, err = io.ReadAll(resp.Body)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -127,9 +212,44 @@ func (c *Client) roundTrip(ctx context.Context, method, path string, jsonBody an
 		if msg == "" {
 			msg = errBody.Error
 		}
-		return nil, &APIError{Status: resp.StatusCode, Code: errBody.Code, Message: msg, Body: string(data)}
+		return nil, &APIError{
+			Status:     resp.StatusCode,
+			Code:       errBody.Code,
+			Message:    msg,
+			Body:       string(data),
+			RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After"), time.Now()),
+		}
 	}
 	return data, nil
+}
+
+func readBounded(r io.Reader, limit int64) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(r, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) <= limit {
+		return data, nil
+	}
+	return append(data[:limit], []byte("\n… response truncated")...), nil
+}
+
+func parseRetryAfter(value string, now time.Time) time.Duration {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0
+	}
+	if seconds, err := strconv.Atoi(value); err == nil {
+		if seconds <= 0 {
+			return 0
+		}
+		return time.Duration(seconds) * time.Second
+	}
+	when, err := http.ParseTime(value)
+	if err != nil || !when.After(now) {
+		return 0
+	}
+	return when.Sub(now)
 }
 
 func decode[T any](data []byte) (T, error) {
@@ -246,22 +366,15 @@ type Issue struct {
 }
 
 type CreateIssueRequest struct {
-	Title        string   `json:"title"`
-	Description  string   `json:"description,omitempty"`
-	Status       string   `json:"status,omitempty"`
-	Priority     string   `json:"priority,omitempty"`
-	Type         string   `json:"type,omitempty"`
-	TeamID       string   `json:"team_id"`
-	ProjectID    *string  `json:"project_id,omitempty"`
-	AssigneeID   *string  `json:"assignee_id,omitempty"`
-	LabelIDs     []string `json:"label_ids,omitempty"`
-	TimeEstimate *int     `json:"time_estimate,omitempty"`
-}
-
-type CreateTeamRequest struct {
-	Name      string `json:"name"`
-	IconCode  string `json:"icon_code"`
-	IconColor string `json:"icon_color"`
+	Title       string   `json:"title"`
+	Description string   `json:"description,omitempty"`
+	Status      string   `json:"status,omitempty"`
+	Priority    string   `json:"priority,omitempty"`
+	Type        string   `json:"type,omitempty"`
+	TeamID      string   `json:"team_id"`
+	ProjectID   *string  `json:"project_id,omitempty"`
+	AssigneeID  *string  `json:"assignee_id,omitempty"`
+	LabelIDs    []string `json:"label_ids,omitempty"`
 }
 
 type CreateLabelRequest struct {
@@ -307,21 +420,6 @@ func (c *Client) ListTeams(ctx context.Context) ([]Team, error) {
 	return listAll[Team](c, ctx, "/teams")
 }
 
-func (c *Client) CreateTeam(ctx context.Context, name string) (*Team, error) {
-	wrap, err := post[struct {
-		Team Team `json:"team"`
-	}](c, ctx, "/teams", CreateTeamRequest{
-		Name: name, IconCode: "users", IconColor: "#5E6AD2",
-	})
-	if err != nil {
-		return nil, err
-	}
-	if wrap.Team.ID == "" {
-		return nil, fmt.Errorf("create team: empty response")
-	}
-	return &wrap.Team, nil
-}
-
 func (c *Client) ListUsers(ctx context.Context) ([]User, error) {
 	return listAll[User](c, ctx, "/users")
 }
@@ -331,7 +429,8 @@ func (c *Client) ListProjects(ctx context.Context) ([]Project, error) {
 }
 
 func (c *Client) ListLabels(ctx context.Context, teamID string) ([]Label, error) {
-	out, err := get[page[Label]](c, ctx, fmt.Sprintf("/teams/%s/labels?limit=200", teamID))
+	path := fmt.Sprintf("/teams/%s/labels?archived=false&entity_type=issue", url.PathEscape(teamID))
+	out, err := get[page[Label]](c, ctx, path)
 	if err != nil {
 		return nil, err
 	}
@@ -339,7 +438,7 @@ func (c *Client) ListLabels(ctx context.Context, teamID string) ([]Label, error)
 }
 
 func (c *Client) CreateLabel(ctx context.Context, teamID string, req CreateLabelRequest) (*Label, error) {
-	label, err := post[Label](c, ctx, fmt.Sprintf("/teams/%s/labels", teamID), req)
+	label, err := post[Label](c, ctx, fmt.Sprintf("/teams/%s/labels", url.PathEscape(teamID)), req)
 	if err != nil {
 		return nil, err
 	}
@@ -360,6 +459,17 @@ func (c *Client) CreateIssue(ctx context.Context, req CreateIssueRequest) (*Issu
 	return &issue, nil
 }
 
+func (c *Client) GetIssue(ctx context.Context, issueID string) (*Issue, error) {
+	issue, err := get[Issue](c, ctx, "/issues/"+url.PathEscape(issueID))
+	if err != nil {
+		return nil, err
+	}
+	if issue.ID == "" {
+		return nil, fmt.Errorf("get issue: empty response")
+	}
+	return &issue, nil
+}
+
 func (c *Client) UploadMainDoc(ctx context.Context, issueID, title string, plateJSON []byte) (*Document, error) {
 	var last error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
@@ -372,7 +482,7 @@ func (c *Client) UploadMainDoc(ctx context.Context, issueID, title string, plate
 		if !ok || apiErr.Status != 429 || attempt == maxAttempts-1 {
 			return nil, err
 		}
-		if err := c.wait(ctx, attempt); err != nil {
+		if err := c.wait(ctx, attempt, apiErr.RetryAfter); err != nil {
 			return nil, err
 		}
 	}

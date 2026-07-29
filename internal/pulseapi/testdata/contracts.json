@@ -1,0 +1,10 @@
+{
+  "auth_me": {"user":{"id":"user-1","email":"ada@example.com","display_name":"Ada"}},
+  "workspaces": {"data":[{"role":"owner","status":"active","workspace":{"id":"workspace-1","slug":"acme","name":"Acme"}}]},
+  "teams": {"data":[{"id":"team-1","name":"Engineering","icon_code":"users","icon_color":"#5E6AD2"}]},
+  "projects": {"data":[{"id":"project-1","name":"App","team_id":"team-1"}]},
+  "users": {"data":[{"id":"user-1","email":"ada@example.com","display_name":"Ada"}]},
+  "labels": {"data":[{"id":"label-1","team_id":"team-1","name":"Type: Bug","entity_type":"issue","archived":false}]},
+  "issue": {"id":"issue-1","code":"ENG-1","title":"Fix login","team_id":"team-1","status":"backlog","priority":"high","type":"bug"},
+  "document": {"content":{"id":"document-1","title":"Fix login"}}
+}

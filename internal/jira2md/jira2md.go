@@ -1,4 +1,5 @@
-// Package jira2md converts common Jira wiki markup to GitHub-flavored Markdown.
+// Package jira2md converts a deliberately small, documented subset of Jira
+// wiki markup to GitHub-flavored Markdown.
 package jira2md
 
 import (
@@ -7,94 +8,107 @@ import (
 )
 
 var (
-	reHeader     = regexp.MustCompile(`(?m)^h([1-6])\.\s+(.*)$`)
+	reHeader     = regexp.MustCompile(`^h([1-6])\.\s+(.*)$`)
 	reBold       = regexp.MustCompile(`\*([^*\n]+)\*`)
-	reItalic     = regexp.MustCompile(`(?m)(?P<pre>^|[^a-zA-Z0-9])_([^_\n]+)_(?P<post>$|[^a-zA-Z0-9])`)
-	reCodeInline = regexp.MustCompile(`\{\{([^}]+)\}\}`)
+	reItalic     = regexp.MustCompile(`(^|[^a-zA-Z0-9])_([^_\n]+)_($|[^a-zA-Z0-9])`)
+	reCodeInline = regexp.MustCompile(`\{\{([^}\n]+)\}\}`)
 	reLink       = regexp.MustCompile(`\[([^|\]]+)\|([^\]]+)\]`)
 	reSimpleLink = regexp.MustCompile(`\[(https?://[^\]]+)\]`)
-	reQuote      = regexp.MustCompile(`(?m)^bq\.\s+(.*)$`)
-	reNoformat   = regexp.MustCompile(`(?s)\{noformat\}(.*?)\{noformat\}`)
-	reCode       = regexp.MustCompile(`(?s)\{code(?::[^}]*)?\}(.*?)\{code\}`)
-	rePanel      = regexp.MustCompile(`(?s)\{panel(?::[^}]*)?\}(.*?)\{panel\}`)
-	reColor      = regexp.MustCompile(`(?s)\{color:[^}]+\}(.*?)\{color\}`)
-	reBullet     = regexp.MustCompile(`(?m)^\*\s+`)
-	reNumbered   = regexp.MustCompile(`(?m)^#\s+`)
-	reHR         = regexp.MustCompile(`(?m)^----$`)
+	reColor      = regexp.MustCompile(`\{color:[^}]+\}([^{]*)\{color\}`)
+	reCodeOpen   = regexp.MustCompile(`^\{code(?::[^}]*)?\}\s*$`)
+	rePanelOpen  = regexp.MustCompile(`^\{panel(?::[^}]*)?\}\s*$`)
 )
 
 func Convert(input string) string {
 	if strings.TrimSpace(input) == "" {
 		return ""
 	}
-	s := strings.ReplaceAll(input, "\r\n", "\n")
-	s = strings.ReplaceAll(s, "\r", "\n")
+	input = strings.ReplaceAll(input, "\r\n", "\n")
+	input = strings.ReplaceAll(input, "\r", "\n")
+	lines := strings.Split(input, "\n")
+	out := make([]string, 0, len(lines))
+	inCode := false
+	inPanel := false
+	jiraStyle := looksLikeJiraWiki(input)
 
-	if looksLikeWiki(s) {
-		return convertWiki(s)
+	for index, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		switch {
+		case inCode && (trimmed == "{code}" || trimmed == "{noformat}"):
+			out = append(out, "```")
+			inCode = false
+			continue
+		case inCode:
+			out = append(out, line)
+			continue
+		case reCodeOpen.MatchString(trimmed) || trimmed == "{noformat}":
+			out = append(out, "```")
+			inCode = true
+			continue
+		case inPanel && trimmed == "{panel}":
+			inPanel = false
+			continue
+		case !inPanel && rePanelOpen.MatchString(trimmed):
+			inPanel = true
+			continue
+		}
+
+		converted := convertLine(line, lines, index, jiraStyle)
+		if inPanel {
+			converted = "> " + converted
+		}
+		out = append(out, converted)
 	}
-	return strings.TrimSpace(s)
+	// Preserve unmatched opening blocks rather than silently dropping content.
+	if inCode {
+		out = append(out, "```")
+	}
+	return strings.TrimSpace(strings.Join(out, "\n"))
 }
 
-func looksLikeWiki(s string) bool {
-	return strings.Contains(s, "h1.") ||
-		strings.Contains(s, "h2.") ||
-		strings.Contains(s, "h3.") ||
-		strings.Contains(s, "{code") ||
-		strings.Contains(s, "{noformat}") ||
-		strings.Contains(s, "{panel") ||
-		strings.Contains(s, "bq.") ||
-		reLink.MatchString(s)
+func convertLine(line string, all []string, index int, jiraStyle bool) string {
+	if match := reHeader.FindStringSubmatch(line); len(match) == 3 {
+		return strings.Repeat("#", int(match[1][0]-'0')) + " " + convertInline(match[2])
+	}
+	if strings.HasPrefix(line, "bq. ") {
+		return "> " + convertInline(strings.TrimPrefix(line, "bq. "))
+	}
+	if strings.HasPrefix(line, "* ") {
+		return "- " + convertInline(strings.TrimPrefix(line, "* "))
+	}
+	if strings.HasPrefix(line, "# ") && (jiraStyle || jiraNumberedContext(all, index)) {
+		return "1. " + convertInline(strings.TrimPrefix(line, "# "))
+	}
+	if strings.TrimSpace(line) == "----" {
+		return "---"
+	}
+	return convertInline(line)
 }
 
-func convertWiki(s string) string {
-	s = reNoformat.ReplaceAllStringFunc(s, func(m string) string {
-		inner := reNoformat.FindStringSubmatch(m)
-		if len(inner) < 2 {
-			return m
-		}
-		return "```\n" + strings.TrimSpace(inner[1]) + "\n```"
-	})
-	s = reCode.ReplaceAllStringFunc(s, func(m string) string {
-		inner := reCode.FindStringSubmatch(m)
-		if len(inner) < 2 {
-			return m
-		}
-		return "```\n" + strings.TrimSpace(inner[1]) + "\n```"
-	})
-	s = rePanel.ReplaceAllStringFunc(s, func(m string) string {
-		inner := rePanel.FindStringSubmatch(m)
-		if len(inner) < 2 {
-			return m
-		}
-		lines := strings.Split(strings.TrimSpace(inner[1]), "\n")
-		for i, line := range lines {
-			lines[i] = "> " + line
-		}
-		return strings.Join(lines, "\n")
-	})
-	s = reColor.ReplaceAllString(s, "$1")
-	// "# item" must become "1. " before ATX headings are introduced.
-	s = reNumbered.ReplaceAllString(s, "1. ")
-	s = reHeader.ReplaceAllStringFunc(s, func(m string) string {
-		parts := reHeader.FindStringSubmatch(m)
-		if len(parts) < 3 {
-			return m
-		}
-		level := parts[1]
-		n := 0
-		for _, c := range level {
-			n = n*10 + int(c-'0')
-		}
-		return strings.Repeat("#", n) + " " + parts[2]
-	})
-	s = reQuote.ReplaceAllString(s, "> $1")
-	s = reLink.ReplaceAllString(s, "[$1]($2)")
-	s = reSimpleLink.ReplaceAllString(s, "$1")
-	s = reCodeInline.ReplaceAllString(s, "`$1`")
-	s = reBold.ReplaceAllString(s, "**$1**")
-	s = reItalic.ReplaceAllString(s, "${pre}_$2_${post}")
-	s = reBullet.ReplaceAllString(s, "- ")
-	s = reHR.ReplaceAllString(s, "---")
-	return strings.TrimSpace(s)
+func looksLikeJiraWiki(input string) bool {
+	return strings.Contains(input, "bq. ") ||
+		strings.Contains(input, "{code") ||
+		strings.Contains(input, "{noformat}") ||
+		strings.Contains(input, "{panel") ||
+		strings.Contains(input, "{color:") ||
+		strings.Contains(input, "{{") ||
+		reHeader.MatchString(input) ||
+		reLink.MatchString(input)
+}
+
+func jiraNumberedContext(lines []string, index int) bool {
+	if index > 0 && strings.HasPrefix(lines[index-1], "# ") {
+		return true
+	}
+	return index+1 < len(lines) && strings.HasPrefix(lines[index+1], "# ")
+}
+
+func convertInline(line string) string {
+	line = reColor.ReplaceAllString(line, "$1")
+	line = reLink.ReplaceAllString(line, "[$1]($2)")
+	line = reSimpleLink.ReplaceAllString(line, "$1")
+	line = reCodeInline.ReplaceAllString(line, "`$1`")
+	line = reBold.ReplaceAllString(line, "**$1**")
+	line = reItalic.ReplaceAllString(line, "$1_$2_$3")
+	return line
 }

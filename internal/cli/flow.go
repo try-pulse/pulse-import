@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/charmbracelet/huh"
+	"charm.land/huh/v2"
 	"github.com/try-pulse/pulse-import/internal/pulseapi"
 )
 
@@ -31,43 +31,45 @@ func pickWorkspace(ctx context.Context, client *pulseapi.Client, p Prompter) (st
 	return p.Select("Import into workspace", options)
 }
 
-func resolveTeam(ctx context.Context, client *pulseapi.Client, opts Options, defaultName string, p Prompter) (string, error) {
+func resolveTeam(
+	ctx context.Context,
+	client *pulseapi.Client,
+	opts Options,
+	p Prompter,
+) (string, error) {
 	teams, err := client.ListTeams(ctx)
 	if err != nil {
 		return "", fmt.Errorf("list teams: %w", err)
 	}
 
 	if opts.Team != "" {
-		t := findTeam(teams, opts.Team)
-		if t == nil {
-			return "", fmt.Errorf("team %q not found", opts.Team)
+		for _, team := range teams {
+			if team.ID == opts.Team {
+				return team.ID, nil
+			}
 		}
-		return t.ID, nil
+		var matches []pulseapi.Team
+		for _, team := range teams {
+			if strings.EqualFold(team.Name, opts.Team) {
+				matches = append(matches, team)
+			}
+		}
+		switch len(matches) {
+		case 0:
+			return "", fmt.Errorf("team %q not found", opts.Team)
+		case 1:
+			return matches[0].ID, nil
+		default:
+			return "", fmt.Errorf("team name %q is ambiguous; pass the team ID", opts.Team)
+		}
 	}
 
 	if _, ok := p.(nonInteractive); ok {
 		return "", fmt.Errorf("--team is required in non-interactive mode")
 	}
 
-	createNew, err := p.Confirm("Create a new team for imported issues?", true)
-	if err != nil {
-		return "", err
-	}
-	if createNew {
-		name, err := p.Input("Team name", defaultName, required)
-		if err != nil {
-			return "", err
-		}
-		team, err := client.CreateTeam(ctx, strings.TrimSpace(name))
-		if err != nil {
-			return "", fmt.Errorf("create team: %w", err)
-		}
-		fmt.Printf("Created team %s\n", team.Name)
-		return team.ID, nil
-	}
-
 	if len(teams) == 0 {
-		return "", fmt.Errorf("no teams available; create one first")
+		return "", fmt.Errorf("no teams available; create a Pulse team before importing")
 	}
 	options := make([]huh.Option[string], 0, len(teams))
 	for _, t := range teams {
@@ -83,11 +85,27 @@ func resolveProject(ctx context.Context, client *pulseapi.Client, opts Options, 
 			return "", err
 		}
 		for _, proj := range projects {
-			if proj.ID == opts.Project || strings.EqualFold(proj.Name, opts.Project) {
+			if proj.ID == opts.Project {
+				if proj.TeamID != teamID {
+					return "", fmt.Errorf("project %q belongs to a different team", opts.Project)
+				}
 				return proj.ID, nil
 			}
 		}
-		return "", fmt.Errorf("project %q not found", opts.Project)
+		var matches []pulseapi.Project
+		for _, proj := range projects {
+			if strings.EqualFold(proj.Name, opts.Project) && proj.TeamID == teamID {
+				matches = append(matches, proj)
+			}
+		}
+		switch len(matches) {
+		case 0:
+			return "", fmt.Errorf("project %q was not found in the selected team", opts.Project)
+		case 1:
+			return matches[0].ID, nil
+		default:
+			return "", fmt.Errorf("project name %q is ambiguous; pass the project ID", opts.Project)
+		}
 	}
 	if _, ok := p.(nonInteractive); ok {
 		return "", nil
@@ -99,7 +117,7 @@ func resolveProject(ctx context.Context, client *pulseapi.Client, opts Options, 
 	}
 	var teamProjects []pulseapi.Project
 	for _, proj := range projects {
-		if proj.TeamID == "" || proj.TeamID == teamID {
+		if proj.TeamID == teamID {
 			teamProjects = append(teamProjects, proj)
 		}
 	}
