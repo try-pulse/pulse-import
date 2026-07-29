@@ -4,5 +4,5 @@ contact_links:
     url: https://trypulse.tech
     about: Questions about the Pulse product (not this CLI)
   - name: Security vulnerability
-    url: https://github.com/trypulse/pulse-import/security/advisories/new
+    url: https://github.com/try-pulse/pulse-import/security/advisories/new
     about: Report a security issue privately (see SECURITY.md)

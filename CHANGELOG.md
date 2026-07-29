@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Rewrite README for end-user install and usage (banner, install options, mapping, no internal/dev sections)
+- Tighten GitHub repository metadata (homepage, topics, disable wiki/projects)
+
+### Fixed
+
+- Issue template security contact link (`try-pulse` org slug)
+
 ## [0.1.2] - 2026-07-30
 
 ### Fixed

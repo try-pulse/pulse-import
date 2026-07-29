@@ -42,7 +42,7 @@ nfpms:
   - id: nfpms
     package_name: pulse-import
     file_name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
-    homepage: https://github.com/try-pulse/pulse-import
+    homepage: https://trypulse.tech
     maintainer: Pulse <security@trypulse.tech>
     description: Import issues into Pulse from external tools (Jira CSV → Pulse)
     license: MIT
