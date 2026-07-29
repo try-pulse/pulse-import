@@ -64,8 +64,8 @@ jobs:
         with:
           distribution: goreleaser
           version: "~> v2"
-          # Validate builds/archives/nfpms; docker images are exercised on tagged releases.
-          args: release --snapshot --clean --skip=publish,docker
+          # Validate builds/archives/nfpms; dockers_v2 is disabled on snapshots via goreleaser config.
+          args: release --snapshot --clean --skip=publish
         env:
           GOFLAGS: -mod=vendor
 

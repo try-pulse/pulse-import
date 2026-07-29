@@ -54,26 +54,27 @@ nfpms:
     section: utils
     priority: optional
 
-dockers:
-  - id: pulse-import-amd64
-    goos: linux
-    goarch: amd64
+dockers_v2:
+  - id: pulse-import
+    dockerfile: Dockerfile
     ids:
       - pulse-import
-    image_templates:
-      - "ghcr.io/try-pulse/pulse-import:{{ .Version }}-amd64"
-      - "ghcr.io/try-pulse/pulse-import:{{ .Version }}"
-      - "ghcr.io/try-pulse/pulse-import:latest"
-    dockerfile: Dockerfile
-    use: buildx
-    build_flag_templates:
-      - "--platform=linux/amd64"
-      - "--label=org.opencontainers.image.title=pulse-import"
-      - "--label=org.opencontainers.image.description=Import issues into Pulse from external tools"
-      - "--label=org.opencontainers.image.source=https://github.com/try-pulse/pulse-import"
-      - "--label=org.opencontainers.image.version={{ .Version }}"
-      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
-      - "--label=org.opencontainers.image.licenses=MIT"
+    images:
+      - ghcr.io/try-pulse/pulse-import
+    tags:
+      - "{{ .Version }}"
+      - "{{ if not .IsNightly }}latest{{ end }}"
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    disable: "{{ .IsSnapshot }}"
+    labels:
+      "org.opencontainers.image.title": "pulse-import"
+      "org.opencontainers.image.description": "Import issues into Pulse from external tools"
+      "org.opencontainers.image.source": "https://github.com/try-pulse/pulse-import"
+      "org.opencontainers.image.version": "{{ .Version }}"
+      "org.opencontainers.image.revision": "{{ .FullCommit }}"
+      "org.opencontainers.image.licenses": "MIT"
 
 checksum:
   name_template: checksums.txt
