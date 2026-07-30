@@ -13,7 +13,8 @@ Module: `github.com/try-pulse/pulse-import`.
 
 ```
 cmd/pulse-import/     # main
-internal/cli/         # cobra root + rollback, prompts, review output, user mapping
+internal/cli/         # cobra root + rollback, prompts, wizard, review output, user mapping
+internal/cli/tui/     # terminal layout, theme, display-width helpers for interactive UX
 internal/importers/   # Importer interface + jiracsv (header/row/parse/doc)
 internal/importstate/ # append-only crash-safe resume journal (v2 phase ladder)
 internal/runner/      # plan (prepare.go) + execute (execute.go) + mapping (map.go)

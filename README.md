@@ -80,8 +80,12 @@ export PULSE_ACCESS_TOKEN="<jwt>"
 pulse-import
 ```
 
-Prompts: workspace · CSV path · Jira URL · team · project · assignee strategy ·
-user mapping for names that did not match · final preflight confirmation.
+Prompts walk a wizard: **Source** (CSV file picker + Jira URL) → **Destination**
+(team / project / assignee) → **User mapping** → **Review** → import progress.
+
+- Esc / Ctrl+C on a later step returns to the previous step; declining the final confirm cancels without writing
+- Terminal width drives layout, progress bar width, and truncation
+- `TERM=dumb`, non-TTY, or `NO_COLOR` falls back to accessible / plain output
 
 **Safe first pass** — parses, validates, and prints the full write plan and every
 mapping decision. Creates nothing:

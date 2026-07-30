@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"charm.land/huh/v2"
+	"github.com/try-pulse/pulse-import/internal/cli/tui"
 	"github.com/try-pulse/pulse-import/internal/importers/jiracsv"
 	"github.com/try-pulse/pulse-import/internal/pulseapi"
 	"github.com/try-pulse/pulse-import/internal/runner"
@@ -53,6 +54,12 @@ func (p *scriptedPrompter) Confirm(string, bool) (bool, error) {
 	p.confirms = p.confirms[1:]
 	return value, nil
 }
+
+func (p *scriptedPrompter) File(title, description string, validate func(string) error) (string, error) {
+	return p.Input(title, description, validate)
+}
+
+func (p *scriptedPrompter) Options() tui.Options { return tui.Options{} }
 
 func TestParseJiraURL(t *testing.T) {
 	t.Parallel()

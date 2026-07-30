@@ -47,6 +47,7 @@ config.local.yml
 *.swo
 *~
 .cursor/
+.agents/
 
 # OS
 .DS_Store

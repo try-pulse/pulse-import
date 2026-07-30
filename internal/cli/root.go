@@ -2,16 +2,18 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"strings"
+	"time"
 
-	"charm.land/huh/v2"
 	"github.com/schollz/progressbar/v3"
 	"github.com/spf13/cobra"
 
 	"github.com/try-pulse/pulse-import/internal/auth"
+	"github.com/try-pulse/pulse-import/internal/cli/tui"
 	"github.com/try-pulse/pulse-import/internal/pulseapi"
 	"github.com/try-pulse/pulse-import/internal/runner"
 	"github.com/try-pulse/pulse-import/internal/version"
@@ -79,8 +81,15 @@ func NewRootWithDependencies(deps Dependencies) *cobra.Command {
 		SilenceUsage:  true,
 		Long: `Import issues into Pulse (v1: Jira CSV).
 
+Interactive mode walks Source → Destination → Mapping → Review.
+Esc / Ctrl+C on a later step returns to the previous step; decline the final
+confirm to cancel without writing.
+
 Auth:
   export PULSE_ACCESS_TOKEN=<jwt>
+
+Safe first pass:
+  pulse-import --dry-run --file ./jira.csv --jira-url https://acme.atlassian.net …
 
 Non-interactive:
   PULSE_ACCESS_TOKEN=… pulse-import \
@@ -146,6 +155,7 @@ Undo:
 		buildCommit, buildDate,
 	))
 	cmd.AddCommand(newRollbackCommand(deps))
+	registerCompletions(cmd)
 	return cmd
 }
 
@@ -251,8 +261,7 @@ func runImport(cmd *cobra.Command, opts Options, deps Dependencies) error {
 			return fmt.Errorf("--skip-status and --only-status both list %q", status)
 		}
 	}
-	staleAfter, err := parseStale(opts.SkipStale)
-	if err != nil {
+	if _, err := parseStale(opts.SkipStale); err != nil {
 		return err
 	}
 	userMap, err := parseUserMap(opts.MapUser)
@@ -271,111 +280,27 @@ func runImport(cmd *cobra.Command, opts Options, deps Dependencies) error {
 		return fmt.Errorf("--concurrency must be at least 1")
 	}
 
-	accessible := !isTerminal(cmd.InOrStdin()) || !isTerminal(errOut) ||
+	accessible := !tui.IsTerminal(cmd.InOrStdin()) || !tui.IsTerminal(errOut) ||
 		strings.EqualFold(os.Getenv("TERM"), "dumb")
 	prompter := deps.NewPrompter(ctx, opts.NoPrompt, cmd.InOrStdin(), errOut, accessible)
 
 	sess, err := newSession(cmd, deps, prompter, opts.APIURL, opts.Workspace)
 	if err != nil {
-		return err
-	}
-
-	importerID := strings.TrimSpace(opts.Importer)
-	if importerID == "" {
-		options := make([]huh.Option[string], 0, len(registry))
-		for _, registration := range registry {
-			options = append(options, huh.NewOption(registration.Label, registration.ID))
+		if errors.Is(err, ErrCanceled) {
+			_, _ = fmt.Fprintln(out, err.Error())
+			return nil
 		}
-		if importerID, err = prompter.Select("Which service would you like to import from?", options); err != nil {
-			return err
-		}
-	}
-	registration, err := lookupImporter(importerID)
-	if err != nil {
 		return err
-	}
-	importerID = registration.ID
-	importer, err := registration.New(opts, epics, prompter)
-	if err != nil {
-		return err
-	}
-	_, _ = fmt.Fprintf(out, "Parsing %s…\n", importer.Name())
-	data, err := importer.Import(ctx)
-	if err != nil {
-		return err
-	}
-	_, _ = fmt.Fprintf(out, "Parsed %d issue(s), %d epic(s), %d label(s), %d user(s)\n",
-		len(data.Issues), len(data.Projects), len(data.Labels), len(data.Users))
-
-	teams, err := sess.client.ListTeams(ctx)
-	if err != nil {
-		return fmt.Errorf("list teams: %w", err)
-	}
-	teamID, err := resolveTeam(teams, opts, prompter)
-	if err != nil {
-		return err
-	}
-	projectID, err := resolveProject(ctx, sess.client, opts, teamID, prompter)
-	if err != nil {
-		return err
-	}
-	if mode == "" {
-		if mode, err = assigneeMode(opts, prompter); err != nil {
-			return err
-		}
 	}
 
-	path := teamPath(teams, teamID)
-	if mode == runner.AssigneeMapped {
-		if userMap, err = mapUsersInteractively(
-			ctx, out, prompter, sess.client, data.Users, path, userMap,
-		); err != nil {
-			return err
-		}
-	}
-
-	estimateSettings := pulseapi.EstimateSettings{}
-	if team, ok := findTeam(teams, teamID); ok {
-		estimateSettings = team.EstimateSettings
-	}
-
-	engine := runner.New(sess.client)
-	plan, err := engine.Prepare(ctx, data, runner.Options{
-		ImporterID:       importerID,
-		APIURL:           sess.apiURL,
-		WorkspaceID:      sess.workspaceID,
-		TeamID:           teamID,
-		TeamPath:         path,
-		ProjectID:        projectID,
-		Assignee:         mode,
-		SelfUserID:       sess.me.ID,
-		UserMap:          userMap,
-		EstimateSettings: estimateSettings,
-		LabelPolicy:      labelPolicy(opts),
-		AddMigratedLabel: !opts.NoMigrated,
-		SkipLabels:       opts.SkipLabels,
-		SkipComments:     opts.SkipComments,
-		SkipRelations:    opts.SkipRelations,
-		SkipStatuses:     skipStatuses,
-		OnlyStatuses:     onlyStatuses,
-		StaleAfter:       staleAfter,
-		Concurrency:      opts.Concurrency,
-	})
-	if err != nil {
-		return err
-	}
-	printPlan(out, plan, opts.DryRun)
-	if !plan.Valid() {
-		return fmt.Errorf(
-			"preflight failed with %d validation error(s); no Pulse changes were made", len(plan.Errors))
-	}
-	if opts.DryRun {
-		_, _ = fmt.Fprintf(out, "Dry run OK — no Pulse changes were made\n")
+	state, plan, err := runWizardPhases(ctx, out, errOut, sess, &opts, epics, prompter, userMap, mode)
+	switch {
+	case errors.Is(err, errDryRunDone), errors.Is(err, errNothingToImport):
 		return nil
-	}
-	if len(plan.Items) == 0 {
-		_, _ = fmt.Fprintln(out, "Nothing to import after filtering — no Pulse changes were made")
+	case errors.Is(err, ErrCanceled):
 		return nil
+	case err != nil:
+		return err
 	}
 
 	if len(retryUnknown) > 0 && !opts.NoPrompt {
@@ -384,35 +309,45 @@ func runImport(cmd *cobra.Command, opts Options, deps Dependencies) error {
 			false,
 		)
 		if err != nil {
+			if errors.Is(err, ErrCanceled) {
+				_, _ = fmt.Fprintln(out, "Import canceled — no Pulse changes were made")
+				return nil
+			}
 			return err
 		}
 		if !confirmed {
 			return fmt.Errorf("unknown create retry was not confirmed")
 		}
 	}
-	if !opts.NoPrompt {
-		confirmed, err := prompter.Confirm("Proceed with this import plan?", false)
-		if err != nil {
-			return err
-		}
-		if !confirmed {
-			_, _ = fmt.Fprintln(out, "Import canceled — no Pulse changes were made")
-			return nil
-		}
-	}
 
 	stateFile := strings.TrimSpace(opts.StateFile)
 	if stateFile == "" {
-		stateFile = defaultStatePath(data.SourcePath)
+		if state == nil || state.data == nil {
+			return fmt.Errorf("internal: missing parsed import data after wizard")
+		}
+		stateFile = defaultStatePath(state.data.SourcePath)
 	}
+	if plan == nil {
+		return fmt.Errorf("internal: missing import plan after wizard")
+	}
+	engine := runner.New(sess.client)
 	bar := newProgressBar(errOut, plan.TotalWrites())
 	result, runErr := engine.Execute(ctx, plan, runner.ExecuteOptions{
 		StateFile: stateFile, ContinueOnError: opts.Continue,
 		Adopt: adoptions, RetryUnknown: retryUnknown,
 		OnProgress: func(progress runner.Progress) {
-			if bar != nil {
-				_ = bar.Set(progress.Completed)
+			if bar == nil {
+				return
 			}
+			desc := "Importing"
+			if progress.Phase != "" {
+				desc = progress.Phase
+				if progress.Key != "" {
+					desc = progress.Phase + " " + progress.Key
+				}
+			}
+			bar.Describe(desc)
+			_ = bar.Set(progress.Completed)
 		},
 	})
 	if bar != nil {
@@ -423,16 +358,18 @@ func runImport(cmd *cobra.Command, opts Options, deps Dependencies) error {
 }
 
 func newProgressBar(errOut io.Writer, total int) *progressbar.ProgressBar {
-	if !isTerminal(errOut) {
+	if !tui.IsTerminal(errOut) {
 		return nil
 	}
+	width := tui.ProgressBarWidth(tui.TermWidth(errOut))
 	return progressbar.NewOptions(
 		total,
 		progressbar.OptionSetWriter(errOut),
 		progressbar.OptionSetDescription("Importing"),
 		progressbar.OptionShowCount(),
-		progressbar.OptionSetWidth(20),
+		progressbar.OptionSetWidth(width),
 		progressbar.OptionClearOnFinish(),
+		progressbar.OptionThrottle(65*time.Millisecond),
 	)
 }
 
@@ -450,13 +387,4 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
-}
-
-func isTerminal(value any) bool {
-	file, ok := value.(*os.File)
-	if !ok {
-		return false
-	}
-	info, err := file.Stat()
-	return err == nil && info.Mode()&os.ModeCharDevice != 0
 }

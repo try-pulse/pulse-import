@@ -2,13 +2,16 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"strings"
 
+	"github.com/schollz/progressbar/v3"
 	"github.com/spf13/cobra"
 
+	"github.com/try-pulse/pulse-import/internal/cli/tui"
 	"github.com/try-pulse/pulse-import/internal/importstate"
 	"github.com/try-pulse/pulse-import/internal/pulseapi"
 )
@@ -59,6 +62,7 @@ already be in use by work that was not imported.
 	cmd.Flags().BoolVar(&opts.NoPrompt, "yes", false, "Do not ask for confirmation")
 	cmd.Flags().BoolVar(&opts.KeepDocs, "keep-documents", false, "Delete issues and projects but keep their Main Docs")
 	cmd.Flags().BoolVar(&opts.Continue, "continue-on-error", false, "Keep going after a delete fails")
+	registerRollbackCompletions(cmd)
 	return cmd
 }
 
@@ -74,7 +78,7 @@ func runRollback(cmd *cobra.Command, opts rollbackOptions, deps Dependencies) er
 		return fmt.Errorf("state file not found: %s", stateFile)
 	}
 
-	accessible := !isTerminal(cmd.InOrStdin()) || !isTerminal(errOut) ||
+	accessible := !tui.IsTerminal(cmd.InOrStdin()) || !tui.IsTerminal(errOut) ||
 		strings.EqualFold(os.Getenv("TERM"), "dumb")
 	prompter := deps.NewPrompter(ctx, opts.NoPrompt, cmd.InOrStdin(), errOut, accessible)
 
@@ -101,11 +105,19 @@ func runRollback(cmd *cobra.Command, opts rollbackOptions, deps Dependencies) er
 		return nil
 	}
 
-	_, _ = fmt.Fprintf(out, "\nRollback plan for %s\n", stateFile)
-	_, _ = fmt.Fprintf(out, "  Target: workspace=%s team=%s\n", identity.WorkspaceID, identity.TeamID)
 	issues, projects, docs := countTargets(targets)
-	_, _ = fmt.Fprintf(out, "  Delete: %d issue(s) · %d project(s) · %d Main Doc(s)\n", issues, projects, docs)
-	_, _ = fmt.Fprintln(out, "  Labels are left alone; they may be shared with work that was not imported.")
+	styles := reviewStyles(out)
+	_, _ = fmt.Fprintf(out, "\n%s\n", styles.HeadingText("Rollback plan"))
+	summary := fmt.Sprintf("State: %s\nTarget: workspace=%s team=%s\nDelete: %d issue(s) · %d project(s) · %d Main Doc(s)\nLabels are left alone; they may be shared with work that was not imported.",
+		stateFile, identity.WorkspaceID, identity.TeamID, issues, projects, docs)
+	if styles.Enabled {
+		_, _ = fmt.Fprintln(out, styles.Box.Render(summary))
+	} else {
+		_, _ = fmt.Fprintf(out, "  State: %s\n", stateFile)
+		_, _ = fmt.Fprintf(out, "  Target: workspace=%s team=%s\n", identity.WorkspaceID, identity.TeamID)
+		_, _ = fmt.Fprintf(out, "  Delete: %d issue(s) · %d project(s) · %d Main Doc(s)\n", issues, projects, docs)
+		_, _ = fmt.Fprintln(out, "  Labels are left alone; they may be shared with work that was not imported.")
+	}
 
 	if identity.WorkspaceID != sess.workspaceID {
 		return fmt.Errorf(
@@ -118,6 +130,10 @@ func runRollback(cmd *cobra.Command, opts rollbackOptions, deps Dependencies) er
 		confirmed, err := prompter.Confirm(
 			fmt.Sprintf("Permanently delete these %d entities from Pulse?", len(targets)), false)
 		if err != nil {
+			if errors.Is(err, ErrCanceled) {
+				_, _ = fmt.Fprintln(out, "Rollback canceled — no Pulse changes were made")
+				return nil
+			}
 			return err
 		}
 		if !confirmed {
@@ -126,12 +142,18 @@ func runRollback(cmd *cobra.Command, opts rollbackOptions, deps Dependencies) er
 		}
 	}
 
-	deleted, failed := deleteTargets(ctx, sess.client, targets, opts.Continue, errOut)
-	_, _ = fmt.Fprintf(out, "\nRollback result: %d deleted · %d failed\n", deleted, failed)
+	bar := newProgressBar(errOut, len(targets))
+	deleted, failed := deleteTargets(ctx, sess.client, targets, opts.Continue, errOut, bar)
+	if bar != nil {
+		_ = bar.Finish()
+	}
+	resultStyles := reviewStyles(out)
+	_, _ = fmt.Fprintf(out, "\n%s\n", resultStyles.HeadingText("Rollback result"))
+	_, _ = fmt.Fprintf(out, "  %d deleted · %d failed\n", deleted, failed)
 	if failed > 0 {
 		return fmt.Errorf("rollback finished with %d failure(s); the state file was left in place", failed)
 	}
-	_, _ = fmt.Fprintf(out, "You can now delete the state file: %s\n", stateFile)
+	_, _ = fmt.Fprintf(out, "%s\n", resultStyles.OKLine("You can now delete the state file: "+stateFile))
 	return nil
 }
 
@@ -182,8 +204,9 @@ func deleteTargets(
 	targets []target,
 	continueOnError bool,
 	errOut io.Writer,
+	bar *progressbar.ProgressBar,
 ) (deleted, failed int) {
-	for _, t := range targets {
+	for i, t := range targets {
 		if err := ctx.Err(); err != nil {
 			_, _ = fmt.Fprintf(errOut, "error: rollback interrupted: %v\n", err)
 			return deleted, failed + 1
@@ -207,6 +230,10 @@ func deleteTargets(
 			if !continueOnError {
 				return deleted, failed
 			}
+		}
+		if bar != nil {
+			bar.Describe("Deleting " + t.Kind)
+			_ = bar.Set(i + 1)
 		}
 	}
 	return deleted, failed

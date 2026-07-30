@@ -433,7 +433,7 @@ func TestPrintPlanWarnsWhenTheTeamAlreadyHasIssues(t *testing.T) {
 }
 
 func TestRootRejectsMissingTokenAndInvalidURLWithoutPrintingErrors(t *testing.T) {
-	t.Parallel()
+	t.Setenv(auth.EnvAccessToken, "")
 	got := runCLI(t, "--yes", "--api-url", "ftp://example.com")
 	if got.err == nil {
 		t.Fatal("expected invalid URL error")

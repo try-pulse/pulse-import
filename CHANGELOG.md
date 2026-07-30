@@ -5,7 +5,20 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.4.0] - 2026-07-30
+
+### Added
+
+- Interactive wizard with Source → Destination → Mapping → Review phases; Esc / Ctrl+C on a later step returns to the previous step (Back re-opens Source so answers can change)
+- CSV file picker (huh) in interactive TUI mode, with path input in accessible mode
+- Terminal-aware layout: content width clamp, display-width truncation, Charm theme, styled plan/result boxes
+- Responsive import/rollback progress bars sized from the terminal width
+- Shell flag completions for `--importer`, `--assignee`, `--epics`, and filename hints for `--file` / `--state-file`
+
+### Changed
+
+- Review and rollback summaries use semantic symbols (✓/⚠/✗) with color when the terminal supports it; plain text when piped, `NO_COLOR`, or accessible mode
+- Help text documents the wizard navigation and dry-run first pass
 
 ## [0.3.0] - 2026-07-30
 

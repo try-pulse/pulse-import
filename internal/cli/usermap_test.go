@@ -9,6 +9,7 @@ import (
 
 	"charm.land/huh/v2"
 
+	"github.com/try-pulse/pulse-import/internal/cli/tui"
 	"github.com/try-pulse/pulse-import/internal/importers"
 	"github.com/try-pulse/pulse-import/internal/pulseapi"
 	"github.com/try-pulse/pulse-import/internal/runner"
@@ -55,6 +56,12 @@ func (p *choicePrompter) Secret(string, string, func(string) error) (string, err
 }
 
 func (p *choicePrompter) Confirm(string, bool) (bool, error) { return p.confirm, nil }
+
+func (p *choicePrompter) File(string, string, func(string) error) (string, error) {
+	return "", errors.New("unexpected File")
+}
+
+func (p *choicePrompter) Options() tui.Options { return tui.Options{} }
 
 func sourceUsers(names ...string) map[string]importers.User {
 	out := map[string]importers.User{}
