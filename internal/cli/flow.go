@@ -31,17 +31,10 @@ func pickWorkspace(ctx context.Context, client *pulseapi.Client, p Prompter) (st
 	return p.Select("Import into workspace", options)
 }
 
-func resolveTeam(
-	ctx context.Context,
-	client *pulseapi.Client,
-	opts Options,
-	p Prompter,
-) (string, error) {
-	teams, err := client.ListTeams(ctx)
-	if err != nil {
-		return "", fmt.Errorf("list teams: %w", err)
-	}
-
+// resolveTeam picks the target team from the already-fetched team list. The list
+// is shared with the assignee roster and estimate-settings lookups, so it is
+// fetched once by the caller.
+func resolveTeam(teams []pulseapi.Team, opts Options, p Prompter) (string, error) {
 	if opts.Team != "" {
 		for _, team := range teams {
 			if team.ID == opts.Team {
@@ -94,7 +87,7 @@ func resolveProject(ctx context.Context, client *pulseapi.Client, opts Options, 
 		}
 		var matches []pulseapi.Project
 		for _, proj := range projects {
-			if strings.EqualFold(proj.Name, opts.Project) && proj.TeamID == teamID {
+			if strings.EqualFold(proj.Title, opts.Project) && proj.TeamID == teamID {
 				matches = append(matches, proj)
 			}
 		}
@@ -134,7 +127,7 @@ func resolveProject(ctx context.Context, client *pulseapi.Client, opts Options, 
 	}
 	options := make([]huh.Option[string], 0, len(teamProjects))
 	for _, proj := range teamProjects {
-		options = append(options, huh.NewOption(proj.Name, proj.ID))
+		options = append(options, huh.NewOption(proj.Title, proj.ID))
 	}
 	return p.Select("Project", options)
 }

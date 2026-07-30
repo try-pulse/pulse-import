@@ -59,8 +59,10 @@ func TestMapPriority(t *testing.T) {
 		{"Normal", importers.PriorityMedium},
 		{"Low", importers.PriorityLow},
 		{"Minor", importers.PriorityLow},
-		{"Lowest", importers.PriorityNoPriority},
-		{"Trivial", importers.PriorityNoPriority},
+		// Jira has five priorities against Pulse's four. Lowest and Trivial mean
+		// "deliberately deprioritised", which is not the same as an empty cell.
+		{"Lowest", importers.PriorityLow},
+		{"Trivial", importers.PriorityLow},
 		{"", importers.PriorityNoPriority},
 		{"something urgent here", importers.PriorityUrgent},
 		{"P2-high-ish", importers.PriorityHigh},
@@ -101,5 +103,121 @@ func TestMapIssueType(t *testing.T) {
 				t.Fatalf("got %q %q want %q %q", typ, lbl, tt.wantTyp, tt.wantLbl)
 			}
 		})
+	}
+}
+
+func TestMapWithResolution(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name           string
+		status         string
+		resolution     string
+		want           statusmap.PulseStatus
+		wantOverridden bool
+	}{
+		{
+			name:   "open with no resolution stays open",
+			status: "Open", want: statusmap.Backlog,
+		},
+		{
+			// Some Jira workflows resolve an issue without renaming its status,
+			// so a resolution is the stronger signal.
+			name:   "resolution closes an open status",
+			status: "Open", resolution: "Won't Do",
+			want: statusmap.Done, wantOverridden: true,
+		},
+		{
+			name:   "done stays done without an override",
+			status: "Done", resolution: "Done",
+			want: statusmap.Done,
+		},
+		{
+			// Jira writes an explicit placeholder in some exports; it must not be
+			// read as "finished".
+			name:   "Unresolved placeholder is not a resolution",
+			status: "In Progress", resolution: "Unresolved",
+			want: statusmap.InProgress,
+		},
+		{
+			name:   "dash placeholder is not a resolution",
+			status: "To Do", resolution: "-",
+			want: statusmap.Todo,
+		},
+		{
+			name:   "duplicate resolution closes the issue",
+			status: "In Review", resolution: "Duplicate",
+			want: statusmap.Done, wantOverridden: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, overridden := statusmap.MapWithResolution(tt.status, tt.resolution)
+			if got != tt.want || overridden != tt.wantOverridden {
+				t.Fatalf("MapWithResolution(%q, %q) = (%q, %v), want (%q, %v)",
+					tt.status, tt.resolution, got, overridden, tt.want, tt.wantOverridden)
+			}
+		})
+	}
+}
+
+func TestParseAndAll(t *testing.T) {
+	t.Parallel()
+	if len(statusmap.All()) != 6 {
+		t.Fatalf("Pulse has six workflow statuses, got %d", len(statusmap.All()))
+	}
+	for _, status := range statusmap.All() {
+		got, ok := statusmap.Parse(string(status))
+		if !ok || got != status {
+			t.Errorf("Parse(%q) = (%q, %v)", status, got, ok)
+		}
+	}
+	// The CLI accepts the human spelling as well as the wire value.
+	if got, ok := statusmap.Parse("In Progress"); !ok || got != statusmap.InProgress {
+		t.Errorf("Parse(\"In Progress\") = (%q, %v)", got, ok)
+	}
+	if _, ok := statusmap.Parse("shipped"); ok {
+		t.Error("Parse must reject a status Pulse does not have")
+	}
+}
+
+func TestIssueTypeClassification(t *testing.T) {
+	t.Parallel()
+	for _, epic := range []string{"Epic", "epic", " EPIC "} {
+		if !statusmap.IsEpicType(epic) {
+			t.Errorf("IsEpicType(%q) = false", epic)
+		}
+	}
+	if statusmap.IsEpicType("Story") {
+		t.Error("IsEpicType(\"Story\") = true")
+	}
+	for _, sub := range []string{"Sub-task", "Subtask", "sub_task", "Sub-bug", "Technical task"} {
+		if !statusmap.IsSubTaskType(sub) {
+			t.Errorf("IsSubTaskType(%q) = false", sub)
+		}
+	}
+	for _, top := range []string{"Task", "Story", "Bug", "Epic"} {
+		if statusmap.IsSubTaskType(top) {
+			t.Errorf("IsSubTaskType(%q) = true", top)
+		}
+	}
+}
+
+// "Latest" contains "test" but is not a QA status; token matching is what keeps
+// substring collisions out of the mapping.
+func TestStatusSubstringCollisions(t *testing.T) {
+	t.Parallel()
+	cases := map[string]statusmap.PulseStatus{
+		"Latest":             statusmap.Backlog,
+		"Ready for Testing":  statusmap.QA,
+		"In Test":            statusmap.QA,
+		"Contested":          statusmap.Backlog,
+		"Closed - Won't Fix": statusmap.Done,
+		"Abandoned":          statusmap.Backlog,
+	}
+	for name, want := range cases {
+		if got := statusmap.Map(name); got != want {
+			t.Errorf("Map(%q) = %q, want %q", name, got, want)
+		}
 	}
 }

@@ -39,7 +39,7 @@ func NewRoot() *cobra.Command {
 	return NewRootWithDependencies(DefaultDependencies())
 }
 
-func NewRootWithDependencies(deps Dependencies) *cobra.Command {
+func withDefaults(deps Dependencies) Dependencies {
 	defaults := DefaultDependencies()
 	if deps.In == nil {
 		deps.In = defaults.In
@@ -62,6 +62,11 @@ func NewRootWithDependencies(deps Dependencies) *cobra.Command {
 	if deps.NewPrompter == nil {
 		deps.NewPrompter = defaults.NewPrompter
 	}
+	return deps
+}
+
+func NewRootWithDependencies(deps Dependencies) *cobra.Command {
+	deps = withDefaults(deps)
 
 	opts := Options{}
 	buildVersion, buildCommit, buildDate := version.Build()
@@ -84,7 +89,10 @@ Non-interactive:
     --file ./jira.csv \
     --workspace <workspace-id> \
     --team <team-id-or-name> \
-    --jira-url https://acme.atlassian.net`,
+    --jira-url https://acme.atlassian.net
+
+Undo:
+  pulse-import rollback --state-file ./jira.csv.pulse-import.state.jsonl`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runImport(cmd, opts, deps)
 		},
@@ -92,25 +100,52 @@ Non-interactive:
 	cmd.SetIn(deps.In)
 	cmd.SetOut(deps.Out)
 	cmd.SetErr(deps.Err)
-	cmd.Flags().StringVar(&opts.APIURL, "api-url", "", "Pulse API base URL (default https://api.trypulse.tech/api/v1)")
-	cmd.Flags().StringVar(&opts.Workspace, "workspace", "", "Workspace ID for X-Workspace-ID")
-	cmd.Flags().StringVar(&opts.Importer, "importer", "", "Importer id (jira-csv)")
-	cmd.Flags().StringVar(&opts.File, "file", "", "Path to source export file")
-	cmd.Flags().StringVar(&opts.Team, "team", "", "Target team id or name")
-	cmd.Flags().StringVar(&opts.Project, "project", "", "Optional project id or name")
-	cmd.Flags().StringVar(&opts.JiraURL, "jira-url", "", "Jira Cloud or on-prem base URL")
-	cmd.Flags().BoolVar(&opts.SelfAssign, "self-assign", false, "Assign all imported issues to yourself")
-	cmd.Flags().BoolVar(&opts.DryRun, "dry-run", false, "Validate and show the write plan without creating anything")
-	cmd.Flags().BoolVar(&opts.Continue, "continue-on-error", false, "Continue after a definitive per-issue failure")
-	cmd.Flags().BoolVar(&opts.NoPrompt, "yes", false, "Non-interactive: require flags/env and accept a valid plan")
-	cmd.Flags().StringVar(&opts.StateFile, "state-file", "", "Resume journal path (default: <csv>.pulse-import.state.jsonl)")
-	cmd.Flags().StringSliceVar(&opts.Adopt, "adopt", nil, "Resolve unknown create as JIRA-KEY=PULSE-ISSUE-ID (repeatable)")
-	cmd.Flags().StringSliceVar(&opts.RetryUnknown, "retry-unknown", nil, "Explicitly retry an unknown Jira key (repeatable; duplicate risk)")
+
+	flags := cmd.Flags()
+	flags.StringVar(&opts.APIURL, "api-url", "", "Pulse API base URL (default https://api.trypulse.tech/api/v1)")
+	flags.StringVar(&opts.Workspace, "workspace", "", "Workspace ID for X-Workspace-ID")
+	flags.StringVar(&opts.Importer, "importer", "", "Importer id (jira-csv)")
+	flags.StringVar(&opts.File, "file", "", "Path to source export file")
+	flags.StringVar(&opts.Team, "team", "", "Target team id or name")
+	flags.StringVar(&opts.Project, "project", "", "Pin every imported issue to this project (id or name); disables epic→project mapping")
+	flags.StringVar(&opts.JiraURL, "jira-url", "", "Jira Cloud or on-prem base URL")
+
+	flags.StringVar(&opts.Assignee, "assignee", "", "Assignee strategy: mapped (default), self, none")
+	flags.BoolVar(&opts.SelfAssign, "self-assign", false, "Shorthand for --assignee self")
+	flags.StringArrayVar(&opts.MapUser, "map-user", nil,
+		`Map a source user: --map-user "Jane Doe=<pulse-user-id|email|skip>" (repeatable)`)
+
+	flags.StringVar(&opts.Epics, "epics", "project", "How to import Jira epics: project or label")
+	flags.BoolVar(&opts.SkipComments, "skip-comments", false, "Do not import comments")
+	flags.BoolVar(&opts.SkipLabels, "skip-labels", false, "Do not create or attach labels")
+	flags.BoolVar(&opts.SkipRelations, "skip-relations", false, "Do not import blocks/blocked-by links")
+	flags.BoolVar(&opts.StrictLabels, "strict-labels", false,
+		"Fail instead of dropping labels past Pulse's limit of 10 per issue")
+	flags.BoolVar(&opts.NoMigrated, "no-migrated-label", false, `Do not add the "Migrated" label`)
+
+	flags.StringSliceVar(&opts.SkipStatus, "skip-status", nil,
+		"Skip issues that map to these Pulse statuses (comma separated)")
+	flags.StringSliceVar(&opts.OnlyStatus, "only-status", nil,
+		"Import only issues that map to these Pulse statuses (comma separated)")
+	flags.StringVar(&opts.SkipStale, "skip-stale", "",
+		"Skip issues not updated within this many days (or a duration like 4320h)")
+
+	flags.IntVar(&opts.Concurrency, "concurrency", 4, "Parallel Pulse writes (1 disables parallelism)")
+
+	flags.BoolVar(&opts.DryRun, "dry-run", false, "Validate and show the write plan without creating anything")
+	flags.BoolVar(&opts.Continue, "continue-on-error", false, "Continue after a definitive per-issue failure")
+	flags.BoolVar(&opts.NoPrompt, "yes", false, "Non-interactive: require flags/env and accept a valid plan")
+
+	flags.StringVar(&opts.StateFile, "state-file", "", "Resume journal path (default: <csv>.pulse-import.state.jsonl)")
+	flags.StringSliceVar(&opts.Adopt, "adopt", nil, "Resolve unknown create as SOURCE-KEY=PULSE-ID (repeatable)")
+	flags.StringSliceVar(&opts.RetryUnknown, "retry-unknown", nil,
+		"Explicitly retry an unknown source key (repeatable; duplicate risk)")
+
 	cmd.SetVersionTemplate(fmt.Sprintf(
 		"{{.Name}} {{.Version}}\ncommit: %s\ndate: %s\n",
-		buildCommit,
-		buildDate,
+		buildCommit, buildDate,
 	))
+	cmd.AddCommand(newRollbackCommand(deps))
 	return cmd
 }
 
@@ -118,26 +153,27 @@ func ExecuteContext(ctx context.Context) error {
 	return NewRoot().ExecuteContext(ctx)
 }
 
-func runImport(cmd *cobra.Command, opts Options, deps Dependencies) error {
-	ctx := cmd.Context()
-	accessible := !isTerminal(cmd.InOrStdin()) || !isTerminal(cmd.ErrOrStderr()) ||
-		strings.EqualFold(os.Getenv("TERM"), "dumb")
-	prompter := deps.NewPrompter(ctx, opts.NoPrompt, cmd.InOrStdin(), cmd.ErrOrStderr(), accessible)
+// session is everything an authenticated run needs, shared by import and
+// rollback.
+type session struct {
+	client      *pulseapi.Client
+	apiURL      string
+	workspaceID string
+	me          *pulseapi.User
+}
 
+func newSession(cmd *cobra.Command, deps Dependencies, prompter Prompter, apiURLFlag, workspaceFlag string) (*session, error) {
+	ctx := cmd.Context()
 	cfg, err := deps.LoadConfig()
 	if err != nil {
-		return err
+		return nil, err
 	}
-	apiURL := strings.TrimSpace(opts.APIURL)
-	if apiURL == "" {
-		apiURL = strings.TrimSpace(os.Getenv(auth.EnvAPIURL))
-	}
-	if apiURL == "" {
-		apiURL = strings.TrimSpace(cfg.APIURL)
-	}
-	if apiURL == "" {
-		apiURL = auth.DefaultAPIURL()
-	}
+	apiURL := firstNonEmpty(
+		strings.TrimSpace(apiURLFlag),
+		strings.TrimSpace(os.Getenv(auth.EnvAPIURL)),
+		strings.TrimSpace(cfg.APIURL),
+		auth.DefaultAPIURL(),
+	)
 	token := auth.AccessToken()
 	if token == "" {
 		token, err = prompter.Secret(
@@ -146,104 +182,83 @@ func runImport(cmd *cobra.Command, opts Options, deps Dependencies) error {
 			required,
 		)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		token = strings.TrimSpace(token)
 	}
 
-	workspaceID := strings.TrimSpace(opts.Workspace)
-	if workspaceID == "" {
-		workspaceID = strings.TrimSpace(os.Getenv(auth.EnvWorkspace))
-	}
-	if workspaceID == "" {
-		workspaceID = strings.TrimSpace(cfg.WorkspaceID)
-	}
+	workspaceID := firstNonEmpty(
+		strings.TrimSpace(workspaceFlag),
+		strings.TrimSpace(os.Getenv(auth.EnvWorkspace)),
+		strings.TrimSpace(cfg.WorkspaceID),
+	)
 
 	client, err := deps.NewClient(apiURL, token, workspaceID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	apiURL = client.BaseURL
 	if client.InsecureRemote() {
-		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: Pulse API uses unencrypted HTTP; the bearer token can be intercepted\n")
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
+			"warning: Pulse API uses unencrypted HTTP; the bearer token can be intercepted\n")
 	}
 	me, err := client.Me(ctx)
 	if err != nil {
-		return fmt.Errorf("authenticate: %w", err)
+		return nil, fmt.Errorf("authenticate: %w", err)
 	}
 	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Signed in as %s\n", displayUser(me))
 
 	if workspaceID == "" {
 		workspaceID, err = pickWorkspace(ctx, client, prompter)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		client.WorkspaceID = workspaceID
-	} else {
-		client.WorkspaceID = workspaceID
 	}
-	cfg.APIURL = apiURL
-	cfg.WorkspaceID = workspaceID
+	client.WorkspaceID = workspaceID
+
+	cfg.APIURL, cfg.WorkspaceID = apiURL, workspaceID
 	if err := deps.SaveConfig(cfg); err != nil {
-		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not save non-secret config (%s): %v\n", auth.ConfigPathHint(), err)
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
+			"warning: could not save non-secret config (%s): %v\n", auth.ConfigPathHint(), err)
 	}
+	return &session{client: client, apiURL: apiURL, workspaceID: workspaceID, me: me}, nil
+}
 
-	importerID := strings.TrimSpace(opts.Importer)
-	if importerID == "" {
-		options := make([]huh.Option[string], 0, len(registry))
-		for _, registration := range registry {
-			options = append(options, huh.NewOption(registration.Label, registration.ID))
+func runImport(cmd *cobra.Command, opts Options, deps Dependencies) error {
+	ctx := cmd.Context()
+	out, errOut := cmd.OutOrStdout(), cmd.ErrOrStderr()
+
+	// Validate flag combinations before authenticating: a typo should not cost a
+	// round trip, let alone a token prompt.
+	mode, err := assigneeMode(opts, nonInteractive{})
+	if err != nil && !isPromptRequired(err) {
+		return err
+	}
+	epics, err := epicMode(opts)
+	if err != nil {
+		return err
+	}
+	skipStatuses, err := parseStatusFilter(opts.SkipStatus, "--skip-status")
+	if err != nil {
+		return err
+	}
+	onlyStatuses, err := parseStatusFilter(opts.OnlyStatus, "--only-status")
+	if err != nil {
+		return err
+	}
+	for status := range skipStatuses {
+		if onlyStatuses[status] {
+			return fmt.Errorf("--skip-status and --only-status both list %q", status)
 		}
-		importerID, err = prompter.Select("Which service would you like to import from?", options)
-		if err != nil {
-			return err
-		}
 	}
-	registration, err := lookupImporter(importerID)
+	staleAfter, err := parseStale(opts.SkipStale)
 	if err != nil {
 		return err
 	}
-	importerID = registration.ID
-	importer, err := registration.New(opts, prompter)
+	userMap, err := parseUserMap(opts.MapUser)
 	if err != nil {
 		return err
 	}
-	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Parsing %s…\n", importer.Name())
-	data, err := importer.Import(ctx)
-	if err != nil {
-		return err
-	}
-
-	teamID, err := resolveTeam(ctx, client, opts, prompter)
-	if err != nil {
-		return err
-	}
-	projectID, err := resolveProject(ctx, client, opts, teamID, prompter)
-	if err != nil {
-		return err
-	}
-	mode, err := assigneeMode(opts, prompter)
-	if err != nil {
-		return err
-	}
-
-	engine := runner.New(client)
-	plan, err := engine.Prepare(ctx, data, runner.Options{
-		ImporterID: importerID, APIURL: apiURL, WorkspaceID: workspaceID,
-		TeamID: teamID, ProjectID: projectID, Assignee: mode, SelfUserID: me.ID,
-	})
-	if err != nil {
-		return err
-	}
-	printPlan(cmd.OutOrStdout(), plan, opts.DryRun)
-	if !plan.Valid() {
-		return fmt.Errorf("preflight failed with %d validation error(s); no Pulse changes were made", len(plan.Errors))
-	}
-	if opts.DryRun {
-		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Dry run OK — no Pulse changes were made\n")
-		return nil
-	}
-
 	adoptions, err := parseKeyValues(opts.Adopt, "--adopt")
 	if err != nil {
 		return err
@@ -252,6 +267,117 @@ func runImport(cmd *cobra.Command, opts Options, deps Dependencies) error {
 	if err != nil {
 		return err
 	}
+	if opts.Concurrency < 1 {
+		return fmt.Errorf("--concurrency must be at least 1")
+	}
+
+	accessible := !isTerminal(cmd.InOrStdin()) || !isTerminal(errOut) ||
+		strings.EqualFold(os.Getenv("TERM"), "dumb")
+	prompter := deps.NewPrompter(ctx, opts.NoPrompt, cmd.InOrStdin(), errOut, accessible)
+
+	sess, err := newSession(cmd, deps, prompter, opts.APIURL, opts.Workspace)
+	if err != nil {
+		return err
+	}
+
+	importerID := strings.TrimSpace(opts.Importer)
+	if importerID == "" {
+		options := make([]huh.Option[string], 0, len(registry))
+		for _, registration := range registry {
+			options = append(options, huh.NewOption(registration.Label, registration.ID))
+		}
+		if importerID, err = prompter.Select("Which service would you like to import from?", options); err != nil {
+			return err
+		}
+	}
+	registration, err := lookupImporter(importerID)
+	if err != nil {
+		return err
+	}
+	importerID = registration.ID
+	importer, err := registration.New(opts, epics, prompter)
+	if err != nil {
+		return err
+	}
+	_, _ = fmt.Fprintf(out, "Parsing %s…\n", importer.Name())
+	data, err := importer.Import(ctx)
+	if err != nil {
+		return err
+	}
+	_, _ = fmt.Fprintf(out, "Parsed %d issue(s), %d epic(s), %d label(s), %d user(s)\n",
+		len(data.Issues), len(data.Projects), len(data.Labels), len(data.Users))
+
+	teams, err := sess.client.ListTeams(ctx)
+	if err != nil {
+		return fmt.Errorf("list teams: %w", err)
+	}
+	teamID, err := resolveTeam(teams, opts, prompter)
+	if err != nil {
+		return err
+	}
+	projectID, err := resolveProject(ctx, sess.client, opts, teamID, prompter)
+	if err != nil {
+		return err
+	}
+	if mode == "" {
+		if mode, err = assigneeMode(opts, prompter); err != nil {
+			return err
+		}
+	}
+
+	path := teamPath(teams, teamID)
+	if mode == runner.AssigneeMapped {
+		if userMap, err = mapUsersInteractively(
+			ctx, out, prompter, sess.client, data.Users, path, userMap,
+		); err != nil {
+			return err
+		}
+	}
+
+	estimateSettings := pulseapi.EstimateSettings{}
+	if team, ok := findTeam(teams, teamID); ok {
+		estimateSettings = team.EstimateSettings
+	}
+
+	engine := runner.New(sess.client)
+	plan, err := engine.Prepare(ctx, data, runner.Options{
+		ImporterID:       importerID,
+		APIURL:           sess.apiURL,
+		WorkspaceID:      sess.workspaceID,
+		TeamID:           teamID,
+		TeamPath:         path,
+		ProjectID:        projectID,
+		Assignee:         mode,
+		SelfUserID:       sess.me.ID,
+		UserMap:          userMap,
+		EstimateSettings: estimateSettings,
+		LabelPolicy:      labelPolicy(opts),
+		AddMigratedLabel: !opts.NoMigrated,
+		SkipLabels:       opts.SkipLabels,
+		SkipComments:     opts.SkipComments,
+		SkipRelations:    opts.SkipRelations,
+		SkipStatuses:     skipStatuses,
+		OnlyStatuses:     onlyStatuses,
+		StaleAfter:       staleAfter,
+		Concurrency:      opts.Concurrency,
+	})
+	if err != nil {
+		return err
+	}
+	printPlan(out, plan, opts.DryRun)
+	if !plan.Valid() {
+		return fmt.Errorf(
+			"preflight failed with %d validation error(s); no Pulse changes were made", len(plan.Errors))
+	}
+	if opts.DryRun {
+		_, _ = fmt.Fprintf(out, "Dry run OK — no Pulse changes were made\n")
+		return nil
+	}
+	if len(plan.Items) == 0 {
+		_, _ = fmt.Fprintln(out, "Nothing to import after filtering — no Pulse changes were made")
+		return nil
+	}
+
 	if len(retryUnknown) > 0 && !opts.NoPrompt {
 		confirmed, err := prompter.Confirm(
 			"Retry unknown creates? This can create duplicates if Pulse accepted the earlier request.",
@@ -270,7 +396,7 @@ func runImport(cmd *cobra.Command, opts Options, deps Dependencies) error {
 			return err
 		}
 		if !confirmed {
-			_, _ = fmt.Fprintln(cmd.OutOrStdout(), "Import canceled — no Pulse changes were made")
+			_, _ = fmt.Fprintln(out, "Import canceled — no Pulse changes were made")
 			return nil
 		}
 	}
@@ -279,95 +405,51 @@ func runImport(cmd *cobra.Command, opts Options, deps Dependencies) error {
 	if stateFile == "" {
 		stateFile = defaultStatePath(data.SourcePath)
 	}
-	var bar *progressbar.ProgressBar
-	if isTerminal(cmd.ErrOrStderr()) {
-		bar = progressbar.NewOptions(
-			len(plan.Items),
-			progressbar.OptionSetWriter(cmd.ErrOrStderr()),
-			progressbar.OptionSetDescription("Importing issues"),
-			progressbar.OptionShowCount(),
-			progressbar.OptionSetWidth(20),
-			progressbar.OptionClearOnFinish(),
-		)
-	}
+	bar := newProgressBar(errOut, plan.TotalWrites())
 	result, runErr := engine.Execute(ctx, plan, runner.ExecuteOptions{
 		StateFile: stateFile, ContinueOnError: opts.Continue,
 		Adopt: adoptions, RetryUnknown: retryUnknown,
-		OnProgress: func(runner.Progress) {
+		OnProgress: func(progress runner.Progress) {
 			if bar != nil {
-				_ = bar.Add(1)
+				_ = bar.Set(progress.Completed)
 			}
 		},
 	})
 	if bar != nil {
 		_ = bar.Finish()
 	}
-	printResult(cmd.OutOrStdout(), cmd.ErrOrStderr(), result, stateFile)
+	printResult(out, errOut, result, stateFile)
 	return runErr
 }
 
-func printPlan(out io.Writer, plan *runner.Plan, dryRun bool) {
-	mode := "Import plan"
-	if dryRun {
-		mode = "Dry-run plan"
+func newProgressBar(errOut io.Writer, total int) *progressbar.ProgressBar {
+	if !isTerminal(errOut) {
+		return nil
 	}
-	_, _ = fmt.Fprintf(out, "\n%s\n", mode)
-	_, _ = fmt.Fprintf(out, "  Target: workspace=%s team=%s", plan.Options.WorkspaceID, plan.Options.TeamID)
-	if plan.Options.ProjectID != "" {
-		_, _ = fmt.Fprintf(out, " project=%s", plan.Options.ProjectID)
-	}
-	_, _ = fmt.Fprintln(out)
-	_, _ = fmt.Fprintf(out, "  Issues: %d · Main Docs: %d · Labels: %d create / %d reuse\n",
-		len(plan.Items), plan.MainDocCount(), plan.LabelsToCreate(), len(plan.Labels)-plan.LabelsToCreate())
-	_, _ = fmt.Fprintf(out, "  Assignees: %d matched · %d unmatched · %d ambiguous · Rows skipped: %d\n",
-		plan.AssigneesMatched, plan.AssigneesUnmatched, plan.AssigneesAmbiguous, plan.SkippedRows)
-	const diagnosticLimit = 20
-	for i, warning := range plan.Warnings {
-		if i == diagnosticLimit {
-			_, _ = fmt.Fprintf(out, "  … %d more warning(s)\n", len(plan.Warnings)-diagnosticLimit)
-			break
-		}
-		_, _ = fmt.Fprintf(out, "  warning: %s%s\n", diagnosticPrefix(warning), warning.Message)
-	}
-	for i, validationErr := range plan.Errors {
-		if i == diagnosticLimit {
-			_, _ = fmt.Fprintf(out, "  … %d more error(s)\n", len(plan.Errors)-diagnosticLimit)
-			break
-		}
-		_, _ = fmt.Fprintf(out, "  error: %s%s\n", diagnosticPrefix(validationErr), validationErr.Message)
-	}
-}
-
-func diagnosticPrefix(diagnostic runner.Diagnostic) string {
-	var parts []string
-	if diagnostic.Key != "" {
-		parts = append(parts, diagnostic.Key)
-	}
-	if diagnostic.Row > 0 {
-		parts = append(parts, fmt.Sprintf("row %d", diagnostic.Row))
-	}
-	if len(parts) == 0 {
-		return ""
-	}
-	return "[" + strings.Join(parts, ", ") + "] "
-}
-
-func printResult(out, errOut io.Writer, result *runner.Result, stateFile string) {
-	if result == nil {
-		return
-	}
-	_, _ = fmt.Fprintf(out,
-		"\nImport result: %d issues created · %d resumed/skipped · %d issue failures · %d Main Docs created · %d Main Doc failures\n",
-		result.CreatedIssues, result.SkippedIssues, result.FailedIssues,
-		result.CreatedMainDocs, result.FailedMainDocs,
+	return progressbar.NewOptions(
+		total,
+		progressbar.OptionSetWriter(errOut),
+		progressbar.OptionSetDescription("Importing"),
+		progressbar.OptionShowCount(),
+		progressbar.OptionSetWidth(20),
+		progressbar.OptionClearOnFinish(),
 	)
-	_, _ = fmt.Fprintf(out, "State: %s\n", stateFile)
-	for _, warning := range result.Warnings {
-		_, _ = fmt.Fprintf(errOut, "warning: %s\n", warning)
+}
+
+// isPromptRequired reports the sentinel the non-interactive prompter returns when
+// a value has to come from a prompt. It lets flag validation run before
+// authentication without deciding the value yet.
+func isPromptRequired(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "required in non-interactive mode")
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
 	}
-	for _, itemErr := range result.Errors {
-		_, _ = fmt.Fprintf(errOut, "error: %s\n", itemErr)
-	}
+	return ""
 }
 
 func isTerminal(value any) bool {

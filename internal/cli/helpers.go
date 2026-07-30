@@ -12,23 +12,6 @@ import (
 	"github.com/try-pulse/pulse-import/internal/runner"
 )
 
-type Options struct {
-	APIURL       string
-	Workspace    string
-	Importer     string
-	File         string
-	Team         string
-	Project      string
-	JiraURL      string
-	SelfAssign   bool
-	DryRun       bool
-	Continue     bool
-	NoPrompt     bool
-	StateFile    string
-	Adopt        []string
-	RetryUnknown []string
-}
-
 func displayUser(u *pulseapi.User) string {
 	if u.DisplayName != "" {
 		return u.DisplayName
@@ -118,46 +101,21 @@ func parseJiraURL(raw string) (site, custom string, err error) {
 	return "", strings.TrimRight(parsed.String(), "/"), nil
 }
 
-func parseKeyValues(values []string, flagName string) (map[string]string, error) {
-	out := map[string]string{}
-	for _, value := range values {
-		key, target, ok := strings.Cut(value, "=")
-		key, target = strings.TrimSpace(key), strings.TrimSpace(target)
-		if !ok || key == "" || target == "" {
-			return nil, fmt.Errorf("%s expects JIRA-KEY=PULSE-ISSUE-ID, got %q", flagName, value)
-		}
-		folded := strings.ToLower(key)
-		if _, exists := out[folded]; exists {
-			return nil, fmt.Errorf("%s repeats Jira key %q", flagName, key)
-		}
-		out[folded] = target
-	}
-	return out, nil
-}
-
-func parseKeys(values []string) (map[string]bool, error) {
-	out := map[string]bool{}
-	for _, value := range values {
-		key := strings.ToLower(strings.TrimSpace(value))
-		if key == "" {
-			return nil, fmt.Errorf("--retry-unknown requires a Jira key")
-		}
-		if out[key] {
-			return nil, fmt.Errorf("--retry-unknown repeats Jira key %q", value)
-		}
-		out[key] = true
-	}
-	return out, nil
-}
-
 func defaultStatePath(sourcePath string) string {
 	return sourcePath + ".pulse-import.state.jsonl"
 }
 
+// workspaceOptions lists the workspaces the caller may actually import into.
+// GET /workspaces/me returns every membership, including ones that are not
+// active; offering those would hand the user a workspace whose every request
+// comes back 403.
 func workspaceOptions(memberships []pulseapi.WorkspaceMembership) []huh.Option[string] {
 	var options []huh.Option[string]
 	for _, m := range memberships {
 		if m.Workspace == nil {
+			continue
+		}
+		if m.Status != "" && !strings.EqualFold(m.Status, "active") {
 			continue
 		}
 		label := fmt.Sprintf("%s (%s)", m.Workspace.Name, m.Workspace.Slug)
@@ -166,20 +124,40 @@ func workspaceOptions(memberships []pulseapi.WorkspaceMembership) []huh.Option[s
 	return options
 }
 
-func assigneeMode(opts Options, p Prompter) (runner.AssigneeMode, error) {
-	if opts.SelfAssign {
-		return runner.AssigneeSelf, nil
-	}
-	if opts.NoPrompt {
-		return runner.AssigneeMapped, nil
-	}
-	v, err := p.Select("Assignee strategy", []huh.Option[string]{
-		huh.NewOption("Assign to myself", string(runner.AssigneeSelf)),
+func assigneeOptions() []huh.Option[string] {
+	return []huh.Option[string]{
 		huh.NewOption("Keep mapped assignees when possible", string(runner.AssigneeMapped)),
+		huh.NewOption("Assign to myself", string(runner.AssigneeSelf)),
 		huh.NewOption("Leave unassigned", string(runner.AssigneeNone)),
-	})
-	if err != nil {
-		return "", err
 	}
-	return runner.AssigneeMode(v), nil
+}
+
+// teamPath returns the target team plus every ancestor, root last. Pulse accepts
+// an assignee who is a member of any team on this path.
+func teamPath(teams []pulseapi.Team, teamID string) []string {
+	byID := make(map[string]pulseapi.Team, len(teams))
+	for _, team := range teams {
+		byID[team.ID] = team
+	}
+	var path []string
+	seen := map[string]bool{}
+	for current := teamID; current != "" && !seen[current]; {
+		seen[current] = true
+		path = append(path, current)
+		team, ok := byID[current]
+		if !ok || team.Parent == nil {
+			break
+		}
+		current = team.Parent.ID
+	}
+	return path
+}
+
+func findTeam(teams []pulseapi.Team, teamID string) (pulseapi.Team, bool) {
+	for _, team := range teams {
+		if team.ID == teamID {
+			return team, true
+		}
+	}
+	return pulseapi.Team{}, false
 }

@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"charm.land/huh/v2"
+	"github.com/try-pulse/pulse-import/internal/importers/jiracsv"
 	"github.com/try-pulse/pulse-import/internal/pulseapi"
 	"github.com/try-pulse/pulse-import/internal/runner"
 )
@@ -132,7 +133,7 @@ func TestNewJiraCSVImporter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	imp, err := reg.New(opts, p)
+	imp, err := reg.New(opts, jiracsv.EpicModeProject, p)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,7 +150,7 @@ func TestNewJiraCSVImporter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	imp, err = reg.New(opts, p)
+	imp, err = reg.New(opts, jiracsv.EpicModeProject, p)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,7 +223,7 @@ func TestResolveTeamAndProject_Flags(t *testing.T) {
 			})
 		case "/projects":
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"data": []pulseapi.Project{{ID: "pid", Name: "App", TeamID: "tid"}},
+				"data": []pulseapi.Project{{ID: "pid", Title: "App", TeamID: "tid"}},
 			})
 		default:
 			http.NotFound(w, r)
@@ -232,7 +233,7 @@ func TestResolveTeamAndProject_Flags(t *testing.T) {
 	client := mustPulseClient(t, srv.URL, "tok", "ws")
 	p := nonInteractive{}
 
-	tid, err := resolveTeam(context.Background(), client, Options{Team: "Eng", NoPrompt: true}, p)
+	tid, err := resolveTeam(teamsFromServer(t, client), Options{Team: "Eng", NoPrompt: true}, p)
 	if err != nil || tid != "tid" {
 		t.Fatalf("team=%q err=%v", tid, err)
 	}
@@ -242,11 +243,11 @@ func TestResolveTeamAndProject_Flags(t *testing.T) {
 		t.Fatalf("project=%q err=%v", pid, err)
 	}
 
-	if _, err := resolveTeam(context.Background(), client, Options{Team: "missing", NoPrompt: true}, p); err == nil {
+	if _, err := resolveTeam(teamsFromServer(t, client), Options{Team: "missing", NoPrompt: true}, p); err == nil {
 		t.Fatal("expected missing team error")
 	}
 
-	if _, err := resolveTeam(context.Background(), client, Options{NoPrompt: true}, p); err == nil {
+	if _, err := resolveTeam(teamsFromServer(t, client), Options{NoPrompt: true}, p); err == nil {
 		t.Fatal("expected --team required")
 	}
 }
@@ -281,10 +282,10 @@ func TestResolveProjectRejectsWrongTeamAndAmbiguousName(t *testing.T) {
 	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"data": []pulseapi.Project{
-			{ID: "other", Name: "Other", TeamID: "team-2"},
-			{ID: "missing-team", Name: "Missing Team"},
-			{ID: "one", Name: "Same", TeamID: "team-1"},
-			{ID: "two", Name: "Same", TeamID: "team-1"},
+			{ID: "other", Title: "Other", TeamID: "team-2"},
+			{ID: "missing-team", Title: "Missing Team"},
+			{ID: "one", Title: "Same", TeamID: "team-1"},
+			{ID: "two", Title: "Same", TeamID: "team-1"},
 		}})
 	}))
 	t.Cleanup(server.Close)
@@ -336,7 +337,7 @@ func TestInteractiveFlowChoices(t *testing.T) {
 		case "/teams":
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": []pulseapi.Team{{ID: "team-1", Name: "Team"}}})
 		case "/projects":
-			_ = json.NewEncoder(w).Encode(map[string]any{"data": []pulseapi.Project{{ID: "project-1", Name: "Project", TeamID: "team-1"}}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []pulseapi.Project{{ID: "project-1", Title: "Project", TeamID: "team-1"}}})
 		default:
 			http.NotFound(w, r)
 		}
@@ -350,7 +351,7 @@ func TestInteractiveFlowChoices(t *testing.T) {
 		t.Fatalf("workspace=%q err=%v", workspace, err)
 	}
 	team, err := resolveTeam(
-		context.Background(), client, Options{}, &scriptedPrompter{selectValue: "team-1"},
+		teamsFromServer(t, client), Options{}, &scriptedPrompter{selectValue: "team-1"},
 	)
 	if err != nil || team != "team-1" {
 		t.Fatalf("team=%q err=%v", team, err)
@@ -391,4 +392,15 @@ func TestInteractiveJiraAndAssigneeChoices(t *testing.T) {
 	if err != nil || mode != runner.AssigneeNone {
 		t.Fatalf("mode=%q err=%v", mode, err)
 	}
+}
+
+// teamsFromServer fetches the team list the way runImport does, so the resolver
+// tests exercise the same input.
+func teamsFromServer(t *testing.T, client *pulseapi.Client) []pulseapi.Team {
+	t.Helper()
+	teams, err := client.ListTeams(context.Background())
+	if err != nil {
+		t.Fatalf("list teams: %v", err)
+	}
+	return teams
 }

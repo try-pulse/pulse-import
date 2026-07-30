@@ -1,0 +1,15 @@
+Summary,Issue key,Issue id,Parent,Parent id,Parent summary,Issue Type,Status,Project key,Project name,Priority,Resolution,Assignee,Reporter,Creator,Created,Updated,Last Viewed,Resolved,Due Date,Votes,Description,Environment,Watchers,Watchers,Original Estimate,Remaining Estimate,Time Spent,Work Ratio,Labels,Labels,Component/s,Component/s,Fix Version/s,Fix Version/s,Affects Version/s,Attachment,Attachment,Comment,Comment,Comment,Sprint,Sprint,Outward issue link (Blocks),Outward issue link (Blocks),Inward issue link (Blocks),Custom field (Epic Link),Custom field (Story Points),Security Level,Status Category
+Checkout revamp,ENG-1,10001,,,,Epic,In Progress,ENG,,High,,,Jane Doe,Jane Doe,01/Jan/25 10:00 AM,05/Feb/25 9:30 AM,,,,,"h2. Goal
+Make checkout *fast*.",,,,,,,,,,,,,,,,,,,,,,,,,,,,
+Speed up payment step,ENG-2,10002,ENG-1,10001,,Story,In Progress,ENG,,Highest,,Jane Doe,John Smith,John Smith,02/Jan/25 11:00 AM,06/Feb/25 8:00 AM,,,28/Feb/25,,"The payment step is slow.
+
+||Step||Time||
+|auth|900ms|
+|capture|400ms|
+
+!latency.png|thumbnail!",prod,jane,john,10800,,3600,,performance,checkout,Payments,Web,2.1,2.2,2.0,02/Jan/25 11:05 AM;latency.png;https://acme.atlassian.net/secure/attachment/1/latency.png,02/Jan/25 11:06 AM;trace.txt;https://acme.atlassian.net/secure/attachment/2/trace.txt,03/Jan/25 9:00 AM;5b10a2:jane;Looks like a *DB* issue; not the API,"04/Jan/25 9:00 AM;5b10a2:john;Agreed, see [trace|https://example.com/t]",05/Jan/25 9:00 AM;5b10a2:jane;Fixed in 2.1,Sprint 12,Sprint 13,ENG-4,ENG-9,ENG-3,,5,,
+Add payment latency metric,ENG-3,10003,ENG-2,10002,,Sub-task,Done,ENG,,Medium,Done,John Smith,Jane Doe,,02/Jan/25 12:00 PM,10/Jan/25 12:00 PM,,10/Jan/25 12:00 PM,,,Emit a timer.,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+Drop legacy gateway,ENG-4,10004,,,,Task,Open,ENG,,Low,Won't Do,,Jane Doe,,03/Jan/25 10:00 AM,01/Jan/24 10:00 AM,,,,,Not worth it.,,,,,,,,,,,,,,,,,,,,,,,,,ENG-1,,,
+Wire metric into dashboard,ENG-5,10005,ENG-3,10003,,Sub-task,To Do,ENG,,,,,Jane Doe,,04/Jan/25 10:00 AM,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+,ENG-6,10006,,,,Task,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,
+Orphan sub-task,ENG-7,10007,ENG-999,,,Sub-task,To Do,,,,,,Jane Doe,,05/Jan/25 10:00 AM,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,

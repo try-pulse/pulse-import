@@ -13,17 +13,17 @@ Module: `github.com/try-pulse/pulse-import`.
 
 ```
 cmd/pulse-import/     # main
-internal/cli/         # cobra root, prompts, importer registry
-internal/importers/   # Importer interface + jiracsv
-internal/importstate/ # append-only crash-safe resume journal
-internal/runner/      # maps ImportResult → Pulse API (+ Main Doc)
+internal/cli/         # cobra root + rollback, prompts, review output, user mapping
+internal/importers/   # Importer interface + jiracsv (header/row/parse/doc)
+internal/importstate/ # append-only crash-safe resume journal (v2 phase ladder)
+internal/runner/      # plan (prepare.go) + execute (execute.go) + mapping (map.go)
 internal/pulseapi/    # HTTP client
 internal/auth/        # token / config file
-internal/jira2md/     # Jira wiki → Markdown
-internal/statusmap/   # Jira status → Pulse workflow
+internal/jira2md/     # Jira wiki → Markdown (jira2md.go blocks, inline.go marks)
+internal/statusmap/   # Jira status/priority/type → Pulse
 internal/platemd/     # vendored fork (Markdown ↔ Plate); do not treat as upstream dep
 internal/version/     # ldflags-injected Version/Commit/Date
-testdata/             # fixtures
+testdata/jira/        # sample.csv (minimal) + all-fields.csv (real export shape)
 vendor/               # committed modules (required for offline / reproducible go install)
 ```
 
@@ -63,6 +63,51 @@ stores only non-secret API/workspace defaults; tokens are accepted only from
 Writes use a JSONL state journal for resume. Ambiguous creates must be resolved
 with `--adopt` or explicitly retried with `--retry-unknown`; never add heuristic
 title/search deduplication.
+
+## Pulse API constraints that are easy to get wrong
+
+These are enforced server-side and have each caused a class of import failure.
+Do not "simplify" the code that handles them.
+
+1. **Length limits are counted in BYTES.** `pulse-api` validates issue/project
+   titles with `len(string) > 200` and label names with `len(display) > 50`.
+   Request binding checks rune counts, so a rune-based truncation still 400s for
+   non-Latin text. Always use `pulseapi.TruncateForAPI` / `ExceedsAPIBytes`.
+2. **A Main Doc must be uploaded as `text/plain`.** Pulse decides whether a
+   document opens in the Plate editor from the stored `content_type`; only
+   `text/plain` and `application/json` qualify. multipart's
+   `CreateFormFile` default (`application/octet-stream`) makes every imported
+   description an unopenable file.
+3. **An assignee must be a member of the issue's team or a parent team.**
+   `GET /teams/:id/members` is the correct roster: unlike `GET /users` it is not
+   gated on the workspace-admin `users:read` permission, and unlike
+   `GET /users/select` it carries email addresses.
+4. **Label names are unique per (team, entity_type) including archived labels.**
+   Creating a label whose name is held by an archived one returns 409, so it has
+   to be unarchived and reused.
+5. **A project carries `title`, not `name`.**
+6. **Issue codes are allocated sequentially per team** and the API accepts no
+   explicit code, so Jira identifiers can only line up in an empty team. Items
+   are created in ascending source-key order for that reason.
+7. **Pulse supports one level of sub-issues**, and a sub-issue inherits its
+   project and cycle from its parent.
+8. **Estimates must be a value in the team's scale** (`GET /teams` returns
+   `estimate_settings`); anything else is rejected as `INVALID_ESTIMATE`.
+9. **`reporter`, `creator` and `created_at` cannot be set.** They are recorded in
+   the Main Doc instead. Do not "fix" this by inventing fields.
+
+## Execution invariants
+
+- Items are created in waves — projects, then top-level issues, then sub-issues —
+  because wave N+1 needs ids from wave N. Concurrency runs inside a wave only.
+- The per-item phase ladder is `creating → created → doc_uploaded → commented →
+  linked`. A failed phase must leave the item at the phase it reached; carrying
+  on to the next phase would mark it complete and lose the failed work forever.
+- Relations are applied in a link pass after every wave, because they reference
+  other imported issues.
+- The state file identity must never include anything derived from the current
+  Pulse contents (user or label lookups). Doing so breaks the documented
+  "re-run after users join" flow.
 
 ## Out of scope for agents unless asked
 

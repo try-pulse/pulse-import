@@ -72,7 +72,7 @@ API URL and workspace ID; access tokens are never saved.
 
 ## Quick start
 
-1. In Jira: **Advanced issue search** → export CSV with **all fields**
+1. In Jira: **Advanced issue search** → **Export Excel CSV (all fields)**
 2. Run:
 
 ```bash
@@ -80,10 +80,11 @@ export PULSE_ACCESS_TOKEN="<jwt>"
 pulse-import
 ```
 
-Prompts: workspace · CSV path · Jira URL · team · assignee strategy · final
-preflight confirmation.
+Prompts: workspace · CSV path · Jira URL · team · project · assignee strategy ·
+user mapping for names that did not match · final preflight confirmation.
 
-**Safe first pass** (parse, validate, and read current Pulse mappings; no API writes):
+**Safe first pass** — parses, validates, and prints the full write plan and every
+mapping decision. Creates nothing:
 
 ```bash
 pulse-import --dry-run
@@ -98,27 +99,50 @@ PULSE_ACCESS_TOKEN=… pulse-import \
   --file ./jira-export.csv \
   --workspace <workspace-id> \
   --team <team-id-or-name> \
-  --jira-url https://acme.atlassian.net \
-  --self-assign
+  --jira-url https://acme.atlassian.net
 ```
+
+### Undo an import
+
+Every run writes a state journal recording exactly what it created. `rollback`
+deletes precisely that and nothing else:
+
+```bash
+pulse-import rollback --state-file ./jira-export.csv.pulse-import.state.jsonl
+```
+
+Labels are never deleted — they may already be attached to work that was not
+imported.
 
 ## Options
 
 | Flag | Description |
 |------|-------------|
 | `--importer` | Importer id (`jira-csv`) |
-| `--file` | Path to export CSV |
+| `--file` | Path to the export CSV |
 | `--workspace` | Workspace ID |
 | `--team` | Target team (id or name) |
-| `--project` | Optional project (id or name) |
-| `--jira-url` | Jira Cloud / on-prem base URL |
-| `--self-assign` | Assign all imported issues to you |
-| `--dry-run` | Run complete preflight; create nothing |
-| `--continue-on-error` | Continue after definitive item failures |
+| `--project` | Pin every issue to one project (id or name); disables epic→project mapping |
+| `--jira-url` | Jira Cloud or on-prem base URL |
+| `--assignee` | `mapped` (default) · `self` · `none` |
+| `--self-assign` | Shorthand for `--assignee self` |
+| `--map-user` | `--map-user "Jane Doe=<pulse-user-id\|email\|skip>"` (repeatable) |
+| `--epics` | `project` (default) or `label` |
+| `--skip-comments` | Do not import comments |
+| `--skip-labels` | Do not create or attach labels |
+| `--skip-relations` | Do not import blocks / blocked-by links |
+| `--strict-labels` | Fail instead of dropping labels past Pulse's limit of 10 per issue |
+| `--no-migrated-label` | Do not add the `Migrated` label |
+| `--skip-status` | Skip issues mapping to these Pulse statuses (comma separated) |
+| `--only-status` | Import only issues mapping to these Pulse statuses |
+| `--skip-stale` | Skip issues not updated within N days (or a duration like `4320h`) |
+| `--concurrency` | Parallel Pulse writes (default 4; `1` disables parallelism) |
+| `--dry-run` | Run the complete preflight; create nothing |
+| `--continue-on-error` | Continue after a definitive per-item failure |
 | `--yes` | Non-interactive (no prompts) |
-| `--api-url` | Override API base URL |
+| `--api-url` | Override the API base URL |
 | `--state-file` | Resume journal path; defaults beside the CSV |
-| `--adopt KEY=ISSUE_ID` | Resolve an unknown create with an existing Pulse issue |
+| `--adopt KEY=ID` | Resolve an unknown create with an existing Pulse entity |
 | `--retry-unknown KEY` | Explicitly retry an unknown create; may duplicate |
 | `-v` / `--version` | Print version |
 
@@ -128,24 +152,54 @@ PULSE_ACCESS_TOKEN=… pulse-import \
 |------|-------|
 | Summary | Issue title |
 | Description | **Main Doc** (Jira wiki → Markdown → editor JSON) |
-| Issue key | Backlink in the Main Doc |
+| Issue type | Pulse `type` when mappable, plus a `Type: …` label |
+| Epic | **Project**, with its issues filed into it (`--epics label` for a label instead) |
+| Parent / Sub-task | Parent / sub-issue (Pulse allows one level; deeper nesting is flattened onto the top-most ancestor) |
+| Status | Pulse workflow status, best effort |
+| Resolution | Forces `done` when a resolution is set but the status does not say so |
 | Priority | `urgent` · `high` · `medium` · `low` · `no_priority` |
-| Issue Type | Pulse `type` when mappable + label `Type: …` |
-| Labels | Labels (repeated CSV columns OK) |
-| Release / Fix Version | Label `Release: …` |
-| Assignee | Matched by name/email when strategy is “mapped” |
-| Status | Best-effort map to Pulse workflow |
-| Story points | Skipped in v1 |
+| Assignee | Matched against the target team's members by email, then name |
+| Labels | Labels |
+| Component/s | Label `Component: …` |
+| Fix Version/s | Label `Release: …` |
+| Affects Version/s | Label `Affects: …` |
+| Sprint | Label `Sprint: …` |
+| Comments | Comments, prefixed with the original author and date |
+| Due date | Due date |
+| Story points / Original estimate | Estimate, snapped to the team's estimate scale |
+| Blocks / is blocked by | Blocking relations, applied after every issue exists |
+| Attachments | Links to the original files, in the Main Doc |
+| Issue key, Reporter, Creator, Created, Updated, Resolved, Environment, Time spent | Recorded in the Main Doc |
+| — | `Migrated` label on everything the import created |
 
-Issue `description` in Pulse stays empty (UI chrome). The write-up is the **Main Doc**.
+Issue `description` in Pulse stays empty (it is a short UI suffix, not a body).
+The write-up is the **Main Doc**.
+
+Anything the export carries that Pulse has no field for is listed in the plan
+under *Not imported*, so nothing is dropped silently.
+
+### What Pulse cannot store
+
+`Reporter`, `Creator` and the original `Created` date cannot be set through the
+API — Pulse stamps them from the access token and the clock. They are written
+into the Main Doc instead, so the information survives the migration even though
+the fields cannot.
+
+## Matching Jira identifiers
+
+Pulse allocates issue codes sequentially per team and the API accepts no explicit
+code, so identifiers can only line up when the target team starts empty. The
+importer creates issues in ascending source-key order to make that work, and the
+plan warns when the team already holds issues.
 
 ## Safe resume
 
 > [!IMPORTANT]
-> Pulse does not currently provide a server-side import id. `pulse-import`
-> therefore writes a crash-safe JSONL journal beside the CSV before every
-> create request. Re-running with the same CSV and target resumes completed
-> work instead of creating it again.
+> Pulse does not provide a server-side import id. `pulse-import` therefore
+> writes a crash-safe JSONL journal beside the CSV before every create request.
+> Re-running with the same CSV and target resumes completed work instead of
+> creating it again — including after Jira users have joined your Pulse
+> workspace, which is the supported way to improve user matching.
 
 If a connection fails while creating an issue, Pulse may have accepted the
 request even though the CLI received no response. The item is marked `unknown`
@@ -159,14 +213,16 @@ pulse-import ... --adopt ENG-123=64f... --yes
 pulse-import ... --retry-unknown ENG-123 --yes
 ```
 
-Changing the source file, target workspace/team/project, or mapping options
-requires a different state file. Imports created by versions without a journal
-cannot be deduplicated reliably.
+Changing the source file or the target workspace/team/project requires a
+different state file.
 
-- Export CSV with **all fields** from Jira so mapping has what it needs.
+- Export the CSV with **all fields** from Jira so mapping has what it needs.
 - Jira issue keys must be present and unique.
-- Pulse allows at most 10 labels per issue; preflight fails rather than dropping extras.
-- Main Doc failures are reported as failures and produce a non-zero exit status.
+- Pulse allows at most 10 labels per issue; extra labels are dropped least-first
+  with a warning (`--strict-labels` fails instead).
+- Creating labels needs team-manager or workspace-admin rights in Pulse; use
+  `--skip-labels` if you do not have them.
+- Main Doc, comment and link failures are reported and produce a non-zero exit.
 
 ## Help
 

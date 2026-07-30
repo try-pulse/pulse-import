@@ -10,7 +10,7 @@ import (
 type registration struct {
 	ID    string
 	Label string
-	New   func(opts Options, p Prompter) (importers.Importer, error)
+	New   func(opts Options, epics jiracsv.EpicMode, p Prompter) (importers.Importer, error)
 }
 
 var registry = []registration{
@@ -35,7 +35,7 @@ func lookupImporter(id string) (*registration, error) {
 	return nil, fmt.Errorf("unknown importer %q (supported: %v)", id, ids)
 }
 
-func newJiraCSV(opts Options, p Prompter) (importers.Importer, error) {
+func newJiraCSV(opts Options, epics jiracsv.EpicMode, p Prompter) (importers.Importer, error) {
 	filePath := opts.File
 	jiraURL := opts.JiraURL
 
@@ -60,5 +60,7 @@ func newJiraCSV(opts Options, p Prompter) (importers.Importer, error) {
 		FilePath:     filePath,
 		JiraSiteName: site,
 		CustomURL:    custom,
+		Epics:        epics,
+		SkipComments: opts.SkipComments,
 	}), nil
 }

@@ -9,6 +9,7 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"net/url"
 	"strconv"
 	"strings"
@@ -329,17 +330,44 @@ type WorkspaceMembership struct {
 	Workspace *Workspace `json:"workspace"`
 }
 
-type Team struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	IconCode  string `json:"icon_code"`
-	IconColor string `json:"icon_color"`
+// EstimateSettings mirrors a team's estimate configuration. Pulse rejects an
+// estimate that is not in the team's allowed set, so an import has to read this
+// before it can map Jira story points.
+type EstimateSettings struct {
+	Enabled       bool   `json:"enabled"`
+	ScaleType     string `json:"scale_type"`
+	AllowZero     bool   `json:"allow_zero"`
+	ExtendedScale bool   `json:"extended_scale"`
 }
 
+type TeamRef struct {
+	ID string `json:"id"`
+}
+
+type Team struct {
+	ID               string           `json:"id"`
+	Name             string           `json:"name"`
+	IconCode         string           `json:"icon_code"`
+	IconColor        string           `json:"icon_color"`
+	Parent           *TeamRef         `json:"parent,omitempty"`
+	EstimateSettings EstimateSettings `json:"estimate_settings"`
+}
+
+// Project carries Pulse's `title` field. It is deliberately not called Name:
+// the API has no `name` on a project, and reading the wrong key silently left
+// every project unnamed.
 type Project struct {
 	ID     string `json:"id"`
-	Name   string `json:"name"`
+	Title  string `json:"title"`
 	TeamID string `json:"team_id"`
+}
+
+type TeamMember struct {
+	ID        string `json:"id"`
+	Email     string `json:"email"`
+	FirstName string `json:"first_name"`
+	LastName  string `json:"last_name"`
+	Role      string `json:"role"`
 }
 
 type Label struct {
@@ -352,29 +380,61 @@ type Label struct {
 }
 
 type Issue struct {
-	ID          string  `json:"id"`
-	Code        string  `json:"code"`
-	Title       string  `json:"title"`
-	Description string  `json:"description"`
-	Status      string  `json:"status"`
-	Priority    string  `json:"priority"`
-	Type        string  `json:"type"`
-	TeamID      string  `json:"team_id"`
-	ProjectID   *string `json:"project_id,omitempty"`
-	AssigneeID  *string `json:"assignee_id,omitempty"`
-	MainDocID   *string `json:"main_doc_id,omitempty"`
+	ID           string   `json:"id"`
+	Code         string   `json:"code"`
+	Title        string   `json:"title"`
+	Description  string   `json:"description"`
+	Status       string   `json:"status"`
+	Priority     string   `json:"priority"`
+	Type         string   `json:"type"`
+	TeamID       string   `json:"team_id"`
+	ProjectID    *string  `json:"project_id,omitempty"`
+	ParentID     *string  `json:"parent_id,omitempty"`
+	AssigneeID   *string  `json:"assignee_id,omitempty"`
+	MainDocID    *string  `json:"main_doc_id,omitempty"`
+	BlocksIDs    []string `json:"blocks_ids,omitempty"`
+	BlockedByIDs []string `json:"blocked_by_ids,omitempty"`
 }
 
 type CreateIssueRequest struct {
-	Title       string   `json:"title"`
-	Description string   `json:"description,omitempty"`
-	Status      string   `json:"status,omitempty"`
-	Priority    string   `json:"priority,omitempty"`
-	Type        string   `json:"type,omitempty"`
-	TeamID      string   `json:"team_id"`
-	ProjectID   *string  `json:"project_id,omitempty"`
-	AssigneeID  *string  `json:"assignee_id,omitempty"`
-	LabelIDs    []string `json:"label_ids,omitempty"`
+	Title        string     `json:"title"`
+	Description  string     `json:"description,omitempty"`
+	Status       string     `json:"status,omitempty"`
+	Priority     string     `json:"priority,omitempty"`
+	Type         string     `json:"type,omitempty"`
+	TeamID       string     `json:"team_id"`
+	ProjectID    *string    `json:"project_id,omitempty"`
+	ParentID     *string    `json:"parent_id,omitempty"`
+	AssigneeID   *string    `json:"assignee_id,omitempty"`
+	TimeEstimate *int       `json:"time_estimate,omitempty"`
+	DueDate      *time.Time `json:"due_date,omitempty"`
+	LabelIDs     []string   `json:"label_ids,omitempty"`
+}
+
+// UpdateIssueRequest carries only the fields the importer sets after creation.
+// Issue relations reference other imported issues, so they can only be applied
+// once every issue in the plan has an id.
+type UpdateIssueRequest struct {
+	BlocksIDs    *[]string `json:"blocks_ids,omitempty"`
+	BlockedByIDs *[]string `json:"blocked_by_ids,omitempty"`
+}
+
+type CreateProjectRequest struct {
+	Title    string   `json:"title"`
+	Status   string   `json:"status,omitempty"`
+	Priority string   `json:"priority,omitempty"`
+	TeamID   string   `json:"team_id"`
+	LabelIDs []string `json:"label_ids,omitempty"`
+}
+
+type CreateCommentRequest struct {
+	TargetType string `json:"target_type"`
+	TargetID   string `json:"target_id"`
+	Text       string `json:"text"`
+}
+
+type Comment struct {
+	ID string `json:"id"`
 }
 
 type CreateLabelRequest struct {
@@ -428,6 +488,66 @@ func (c *Client) ListProjects(ctx context.Context) ([]Project, error) {
 	return listAll[Project](c, ctx, "/projects")
 }
 
+// ListTeamMembers returns the users Pulse will accept as assignees for a team.
+// This is the correct roster for assignee mapping: unlike GET /users it is not
+// gated on the workspace-admin `users:read` permission, and unlike
+// GET /users/select it includes email addresses.
+func (c *Client) ListTeamMembers(ctx context.Context, teamID string) ([]TeamMember, error) {
+	out, err := get[struct {
+		Members []TeamMember `json:"members"`
+	}](c, ctx, fmt.Sprintf("/teams/%s/members", url.PathEscape(teamID)))
+	if err != nil {
+		return nil, err
+	}
+	return out.Members, nil
+}
+
+// UserOption is one entry from the workspace-wide user picker, which every
+// authenticated caller may read. It carries no email, so it can only widen
+// name-based matching.
+type UserOption struct {
+	ID    string `json:"id"`
+	Label string `json:"label"`
+}
+
+func (c *Client) ListUserOptions(ctx context.Context) ([]UserOption, error) {
+	var all []UserOption
+	for page := 1; ; page++ {
+		out, err := get[struct {
+			Data       []UserOption `json:"data"`
+			Pagination struct {
+				HasNext bool `json:"has_next"`
+			} `json:"pagination"`
+		}](c, ctx, fmt.Sprintf("/users/select?workspace_wide=true&page=%d&limit=100", page))
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, out.Data...)
+		if !out.Pagination.HasNext || len(out.Data) == 0 {
+			return all, nil
+		}
+	}
+}
+
+// CountTeamIssues reports how many issues a team already holds. Pulse assigns
+// issue codes sequentially per team, so identifiers only line up with Jira when
+// the target team starts empty.
+func (c *Client) CountTeamIssues(ctx context.Context, teamID string) (int64, error) {
+	query := url.Values{}
+	query.Set("limit", "1")
+	query.Set("filters[team_id][operator]", "eq")
+	query.Set("filters[team_id][value]", teamID)
+	out, err := get[struct {
+		Pagination struct {
+			Total int64 `json:"total"`
+		} `json:"pagination"`
+	}](c, ctx, "/issues?"+query.Encode())
+	if err != nil {
+		return 0, err
+	}
+	return out.Pagination.Total, nil
+}
+
 func (c *Client) ListLabels(ctx context.Context, teamID string) ([]Label, error) {
 	path := fmt.Sprintf("/teams/%s/labels?archived=false&entity_type=issue", url.PathEscape(teamID))
 	out, err := get[page[Label]](c, ctx, path)
@@ -470,10 +590,155 @@ func (c *Client) GetIssue(ctx context.Context, issueID string) (*Issue, error) {
 	return &issue, nil
 }
 
-func (c *Client) UploadMainDoc(ctx context.Context, issueID, title string, plateJSON []byte) (*Document, error) {
+// UpdateIssue applies the fields that can only be set once every issue exists.
+func (c *Client) UpdateIssue(ctx context.Context, issueID string, req UpdateIssueRequest) (*Issue, error) {
+	data, err := c.doRaw(ctx, http.MethodPut, "/issues/"+url.PathEscape(issueID), req)
+	if err != nil {
+		return nil, err
+	}
+	issue, err := decode[Issue](data)
+	if err != nil {
+		return nil, err
+	}
+	return &issue, nil
+}
+
+// ListArchivedLabels lists a team's archived issue labels. Pulse's uniqueness
+// index ignores the archived flag, so an archived label still blocks creating a
+// live one with the same name and has to be discovered separately.
+func (c *Client) ListArchivedLabels(ctx context.Context, teamID string) ([]Label, error) {
+	path := fmt.Sprintf("/teams/%s/labels?archived=true&entity_type=issue", url.PathEscape(teamID))
+	out, err := get[page[Label]](c, ctx, path)
+	if err != nil {
+		return nil, err
+	}
+	return out.Data, nil
+}
+
+// UnarchiveLabel brings an archived label back so an import can reuse it
+// instead of failing on the duplicate-name conflict.
+func (c *Client) UnarchiveLabel(ctx context.Context, labelID string) (*Label, error) {
+	label, err := post[Label](c, ctx, fmt.Sprintf("/labels/%s/unarchive", url.PathEscape(labelID)), struct{}{})
+	if err != nil {
+		return nil, err
+	}
+	return &label, nil
+}
+
+func (c *Client) CreateProject(ctx context.Context, req CreateProjectRequest) (*Project, error) {
+	wrap, err := post[struct {
+		Project Project `json:"project"`
+	}](c, ctx, "/projects", req)
+	if err != nil {
+		return nil, err
+	}
+	if wrap.Project.ID == "" {
+		return nil, fmt.Errorf("create project: empty response")
+	}
+	return &wrap.Project, nil
+}
+
+func (c *Client) GetProject(ctx context.Context, projectID string) (*Project, error) {
+	data, err := c.doRaw(ctx, http.MethodGet, "/projects/"+url.PathEscape(projectID), nil)
+	if err != nil {
+		return nil, err
+	}
+	// The endpoint has used both a bare project and a {"project": …} wrapper.
+	if wrap, err := decode[struct {
+		Project Project `json:"project"`
+	}](data); err == nil && wrap.Project.ID != "" {
+		return &wrap.Project, nil
+	}
+	project, err := decode[Project](data)
+	if err != nil {
+		return nil, err
+	}
+	if project.ID == "" {
+		return nil, fmt.Errorf("get project: empty response")
+	}
+	return &project, nil
+}
+
+func (c *Client) CreateComment(ctx context.Context, req CreateCommentRequest) (*Comment, error) {
+	wrap, err := post[struct {
+		Comment Comment `json:"comment"`
+	}](c, ctx, "/comments", req)
+	if err != nil {
+		return nil, err
+	}
+	if wrap.Comment.ID == "" {
+		return nil, fmt.Errorf("create comment: empty response")
+	}
+	return &wrap.Comment, nil
+}
+
+// CountComments reports how many comments an issue already carries, so a
+// resumed import can tell which of a row's comments were already posted.
+func (c *Client) CountComments(ctx context.Context, issueID string) (int64, error) {
+	query := url.Values{}
+	query.Set("target_type", "issue")
+	query.Set("target_id", issueID)
+	query.Set("limit", "1")
+	out, err := get[struct {
+		Pagination struct {
+			Total int64 `json:"total"`
+		} `json:"pagination"`
+	}](c, ctx, "/comments?"+query.Encode())
+	if err != nil {
+		return 0, err
+	}
+	return out.Pagination.Total, nil
+}
+
+func (c *Client) DeleteIssue(ctx context.Context, issueID string) error {
+	_, err := c.doRaw(ctx, http.MethodDelete, "/issues/"+url.PathEscape(issueID), nil)
+	return err
+}
+
+func (c *Client) DeleteProject(ctx context.Context, projectID string) error {
+	_, err := c.doRaw(ctx, http.MethodDelete, "/projects/"+url.PathEscape(projectID), nil)
+	return err
+}
+
+func (c *Client) DeleteDocument(ctx context.Context, documentID string) error {
+	_, err := c.doRaw(ctx, http.MethodDelete, "/content/documents/"+url.PathEscape(documentID), nil)
+	return err
+}
+
+// IsNotFound reports a 404, which rollback treats as "already gone".
+func IsNotFound(err error) bool {
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.Status == http.StatusNotFound
+	}
+	return false
+}
+
+// IsConflict reports a 409, used to detect a duplicate label name.
+func IsConflict(err error) bool {
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.Status == http.StatusConflict
+	}
+	return false
+}
+
+// IsForbidden reports a 403, which the importer turns into an actionable
+// permissions message instead of a raw API error.
+func IsForbidden(err error) bool {
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.Status == http.StatusForbidden
+	}
+	return false
+}
+
+// UploadMainDoc attaches a Plate document to an entity as its main document.
+// entityType is "issue" or "project".
+func (c *Client) UploadMainDoc(ctx context.Context, entityType, entityID, title string, plateJSON []byte) (*Document, error) {
 	var last error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
-		doc, err := c.uploadMainDocOnce(ctx, issueID, title, plateJSON)
+		doc, err := c.uploadMainDocOnce(ctx, entityType, entityID, title, plateJSON)
 		if err == nil {
 			return doc, nil
 		}
@@ -489,19 +754,33 @@ func (c *Client) UploadMainDoc(ctx context.Context, issueID, title string, plate
 	return nil, last
 }
 
-func (c *Client) uploadMainDocOnce(ctx context.Context, issueID, title string, plateJSON []byte) (*Document, error) {
+// mainDocContentType must match what the Pulse clients upload for a native
+// document. Pulse decides whether a document can be opened in the Plate editor
+// from its stored content_type, and only `text/plain` and `application/json`
+// qualify — anything else (including multipart's default
+// application/octet-stream) is treated as an opaque file to download, which
+// would make every imported description unopenable in the product.
+const mainDocContentType = "text/plain"
+
+func (c *Client) uploadMainDocOnce(ctx context.Context, entityType, entityID, title string, plateJSON []byte) (*Document, error) {
 	var buf bytes.Buffer
 	w := multipart.NewWriter(&buf)
-	part, err := w.CreateFormFile("file", sanitizeFileName(title))
+
+	header := make(textproto.MIMEHeader)
+	header.Set("Content-Disposition", fmt.Sprintf(
+		`form-data; name="file"; filename=%q`, sanitizeFileName(title),
+	))
+	header.Set("Content-Type", mainDocContentType)
+	part, err := w.CreatePart(header)
 	if err != nil {
 		return nil, err
 	}
 	if _, err := part.Write(plateJSON); err != nil {
 		return nil, err
 	}
-	_ = w.WriteField("title", truncateRunes(title, 200))
+	_ = w.WriteField("title", TruncateForAPI(title, MaxTitleBytes))
 	atts, _ := json.Marshal([]AttachmentRequest{{
-		EntityType: "issue", EntityID: issueID, IsMainDoc: true,
+		EntityType: entityType, EntityID: entityID, IsMainDoc: true,
 	}})
 	_ = w.WriteField("attachments", string(atts))
 	if err := w.Close(); err != nil {
@@ -538,7 +817,36 @@ func sanitizeFileName(title string) string {
 	if s == "" {
 		s = "document"
 	}
-	return truncateRunes(s, 80) + ".json"
+	// `.txt` mirrors the Pulse clients: a native document is Plate JSON stored
+	// in a text file, and the extension is part of how it is recognised.
+	return truncateRunes(s, 80) + ".txt"
+}
+
+// Pulse's field limits are counted in BYTES on the server (len(string), not a
+// rune count), even though request binding validates rune counts. Truncating on
+// runes therefore still produces a 400 for non-Latin text, where one character
+// costs two to four bytes.
+const (
+	MaxTitleBytes = 200
+	MaxLabelBytes = 50
+	MaxTextBytes  = 4000
+)
+
+// TruncateForAPI shortens s to at most limit bytes without splitting a rune.
+func TruncateForAPI(s string, limit int) string {
+	if len(s) <= limit {
+		return s
+	}
+	cut := limit
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
+}
+
+// ExceedsAPIBytes reports whether s is longer than Pulse's byte limit.
+func ExceedsAPIBytes(s string, limit int) bool {
+	return len(s) > limit
 }
 
 func truncateRunes(s string, n int) string {

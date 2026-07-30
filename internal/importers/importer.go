@@ -1,6 +1,9 @@
 package importers
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 type IssuePriority string
 
@@ -21,28 +24,102 @@ const (
 	TypeStory   IssueType = "story"
 )
 
+// Comment is a source-side comment. Pulse always attributes comments to the
+// importing user, so Author/CreatedAt are preserved inside Body instead.
+type Comment struct {
+	Author  string
+	Created time.Time
+	Body    string
+}
+
+// Relation is a source-side issue link expressed between source keys.
+type Relation struct {
+	// Kind is "blocks" (this issue blocks Target) or "blocked_by".
+	Kind      string
+	TargetKey string
+}
+
+const (
+	RelationBlocks    = "blocks"
+	RelationBlockedBy = "blocked_by"
+)
+
 type Issue struct {
-	Key           string
-	SourceRow     int
-	RowHash       string
-	Title         string
-	BodyMarkdown  string // Main Doc body; converted to Plate JSON via platemd
-	Status        string
-	AssigneeID    string // source-side user key (name or email)
-	AssigneeEmail string
-	Priority      IssuePriority
-	Type          IssueType
-	Labels        []string // keys into ImportResult.Labels
+	Key          string
+	SourceRow    int
+	RowHash      string
+	Title        string
+	BodyMarkdown string // Main Doc body; converted to Plate JSON via platemd
+	Status       string
+	// StatusOverride, when set, wins over Status. Used when a Jira resolution
+	// proves the issue is finished even though its status name does not say so.
+	StatusOverride string
+	AssigneeID     string // source-side user key (name or email)
+	AssigneeEmail  string
+	Priority       IssuePriority
+	Type           IssueType
+	Labels         []string // keys into ImportResult.Labels
+
+	// ParentKey is the source key of the issue this one hangs under
+	// (Jira sub-task → parent story). Empty when top-level.
+	ParentKey string
+	// EpicKey is the source key of the epic this issue belongs to. Resolved to
+	// a Pulse project when the epic was imported as one.
+	EpicKey string
+	// IsEpic marks a row that should become a Pulse project rather than an issue.
+	IsEpic bool
+
+	DueDate *time.Time
+	// StoryPoints is the source point estimate (Jira story points).
+	StoryPoints *float64
+	// OriginalEstimateSeconds is Jira's time estimate, used for hour-scale teams.
+	OriginalEstimateSeconds *int
+	// UpdatedAt is the source last-updated time, used by staleness filters.
+	UpdatedAt *time.Time
+
+	Comments  []Comment
+	Relations []Relation
+}
+
+// Project is a source container (Jira epic) that maps onto a Pulse project.
+type Project struct {
+	Key          string
+	SourceRow    int
+	RowHash      string
+	Title        string
+	BodyMarkdown string
+	Status       string
+	Labels       []string
 }
 
 type User struct {
 	Name  string
 	Email string
+	// Rows counts how many source rows reference this user, so the mapping
+	// step can put the busiest names first.
+	Rows int
 }
 
 type Label struct {
 	Name string
+	// Kind groups labels by origin so a per-issue label cap can drop the least
+	// valuable ones first.
+	Kind LabelKind
 }
+
+// LabelKind orders labels by how much meaning they carry, most important first.
+type LabelKind int
+
+const (
+	LabelKindMigrated LabelKind = iota
+	LabelKindType
+	LabelKindJira
+	LabelKindComponent
+	LabelKindFixVersion
+	LabelKindAffectsVersion
+	LabelKindEpic
+	LabelKindSprint
+)
 
 type DiagnosticLevel string
 
@@ -59,12 +136,18 @@ type Diagnostic struct {
 
 type ImportResult struct {
 	Issues            []Issue
+	Projects          []Project
 	Users             map[string]User
 	Labels            map[string]Label
 	Diagnostics       []Diagnostic
 	SourcePath        string
 	SourceURL         string
 	SourceFingerprint string
+	// StatusNames maps each Pulse status to the source status names that landed
+	// on it, so the plan can show the mapping before anything is written.
+	StatusNames map[string][]string
+	// IgnoredColumns lists source columns the importer knowingly does not map.
+	IgnoredColumns []string
 }
 
 type Importer interface {

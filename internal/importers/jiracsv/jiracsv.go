@@ -11,17 +11,33 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/try-pulse/pulse-import/internal/importers"
-	"github.com/try-pulse/pulse-import/internal/jira2md"
-	"github.com/try-pulse/pulse-import/internal/statusmap"
+)
+
+// EpicMode decides what a Jira epic row becomes in Pulse.
+type EpicMode string
+
+const (
+	// EpicModeProject creates a Pulse project per epic and files its children
+	// into it. This mirrors Linear's Jira mapping.
+	EpicModeProject EpicMode = "project"
+	// EpicModeLabel imports epics as ordinary issues and records the epic on
+	// each child as a label instead.
+	EpicModeLabel EpicMode = "label"
 )
 
 type Options struct {
 	FilePath     string
 	JiraSiteName string
 	CustomURL    string
+	// Epics selects the epic mapping. Defaults to EpicModeProject.
+	Epics EpicMode
+	// SkipComments drops Jira comments instead of importing them.
+	SkipComments bool
 }
 
 type Importer struct {
@@ -29,10 +45,88 @@ type Importer struct {
 }
 
 func New(opts Options) *Importer {
+	if opts.Epics == "" {
+		opts.Epics = EpicModeProject
+	}
 	return &Importer{opts: opts}
 }
 
 func (i *Importer) Name() string { return "Jira (CSV)" }
+
+// columnsRead lists every header the importer consumes, so anything else can be
+// reported as knowingly ignored rather than silently dropped.
+var columnsRead = map[string]bool{}
+
+func init() {
+	for _, name := range []string{
+		"summary", "issue key", "issue id", "issue type", "status", "resolution",
+		"priority", "assignee", "assignee id", "assignee email", "assignee email address",
+		"reporter", "creator", "created", "updated", "resolved", "due date",
+		"description", "environment", "labels", "component/s", "components",
+		"fix version/s", "release", "affects version/s", "sprint", "parent",
+		"parent id", "parent summary", "comment", "attachment",
+		"original estimate", "time spent", "remaining estimate",
+		"custom field (epic link)", "custom field (epic name)",
+		"custom field (story points)", "custom field (story point estimate)",
+		"story points", "outward issue link (blocks)", "inward issue link (blocks)",
+	} {
+		columnsRead[name] = true
+	}
+}
+
+// parsed holds one CSV row after field extraction but before Jira's hierarchy
+// has been resolved, which needs the whole file (a parent may appear after its
+// child, and whether a parent is an epic decides project vs sub-issue).
+type parsed struct {
+	rowNumber int
+	rowHash   string
+	key       string
+	issueID   string
+	issueType string
+	isEpic    bool
+	isSubTask bool
+
+	// parentRef is Jira's Parent column, which points at an epic for a story and
+	// at a story for a sub-task.
+	parentRef   string
+	parentIDRef string
+	epicLinkRef string
+
+	// resolved* are filled in by link() once the whole file is known.
+	resolvedParentKey string
+	resolvedEpicKey   string
+
+	summary string
+	body    string
+	status  string
+	// resolvedStatus and statusOverridden come from status + resolution.
+	resolvedStatus   string
+	statusOverridden bool
+	priority         importers.IssuePriority
+	pulseType        importers.IssueType
+	typeLabel        string
+
+	assignee      string
+	assigneeEmail string
+
+	labels    []labelRef
+	dueDate   *time.Time
+	updatedAt *time.Time
+	points    *float64
+	estimateS *int
+	comments  []importers.Comment
+	blocks    []string
+	blockedBy []string
+
+	// doc carries the provenance fields gathered while parsing; the description
+	// and epic/parent context are filled in once the hierarchy is resolved.
+	doc *docBuilder
+}
+
+type labelRef struct {
+	name string
+	kind importers.LabelKind
+}
 
 func (i *Importer) Import(ctx context.Context) (*importers.ImportResult, error) {
 	f, err := os.Open(i.opts.FilePath)
@@ -45,33 +139,62 @@ func (i *Importer) Import(ctx context.Context) (*importers.ImportResult, error) 
 	cr := csv.NewReader(io.TeeReader(f, sourceHash))
 	cr.LazyQuotes = true
 
-	header, err := cr.Read()
+	rawHeader, err := cr.Read()
 	if err != nil {
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			return nil, fmt.Errorf("csv is empty")
 		}
 		return nil, fmt.Errorf("read header: %w", err)
 	}
-	normalizedHeader, err := normalizeHeader(header)
+	head, err := parseHeader(rawHeader)
 	if err != nil {
 		return nil, err
 	}
 	cr.FieldsPerRecord = -1
 
 	result := &importers.ImportResult{
-		Users:      map[string]importers.User{},
-		Labels:     map[string]importers.Label{},
-		SourcePath: i.opts.FilePath,
-		SourceURL:  i.sourceURL(),
+		Users:       map[string]importers.User{},
+		Labels:      map[string]importers.Label{},
+		StatusNames: map[string][]string{},
+		SourcePath:  i.opts.FilePath,
+		SourceURL:   i.sourceURL(),
 	}
+	result.IgnoredColumns = ignoredColumns(head)
+
+	rows, err := i.readRows(ctx, cr, head, result)
+	if err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return nil, fmt.Errorf("csv contains no importable issues")
+	}
+
+	i.link(rows, result)
+	i.emit(rows, result)
+
+	if len(result.Issues) == 0 && len(result.Projects) == 0 {
+		return nil, fmt.Errorf("csv contains no importable issues")
+	}
+	result.SourceFingerprint = hex.EncodeToString(sourceHash.Sum(nil))
+	return result, nil
+}
+
+func (i *Importer) readRows(
+	ctx context.Context,
+	cr *csv.Reader,
+	head *header,
+	result *importers.ImportResult,
+) ([]*parsed, error) {
+	var rows []*parsed
 	seenKeys := map[string]int{}
 	rowNumber := 1
+
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		rec, err := cr.Read()
-		if err == io.EOF {
+		record, err := cr.Read()
+		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
@@ -83,164 +206,56 @@ func (i *Importer) Import(ctx context.Context) (*importers.ImportResult, error) 
 			return nil, fmt.Errorf("read row %d: %w", rowNumber, err)
 		}
 		rowNumber, _ = cr.FieldPos(0)
-		if len(rec) < len(normalizedHeader) {
-			return nil, fmt.Errorf(
-				"read row %d: got %d fields but header has %d",
-				rowNumber, len(rec), len(normalizedHeader),
-			)
-		}
-		if len(rec) > len(normalizedHeader) {
-			for _, extra := range rec[len(normalizedHeader):] {
+
+		if len(record) > len(head.names) {
+			for _, extra := range record[len(head.names):] {
 				if strings.TrimSpace(extra) != "" {
 					return nil, fmt.Errorf(
 						"read row %d: got %d fields but header has %d",
-						rowNumber, len(rec), len(normalizedHeader),
+						rowNumber, len(record), len(head.names),
 					)
 				}
 			}
-			rec = rec[:len(normalizedHeader)]
+			record = record[:len(head.names)]
 		}
-		rw := makeRow(normalizedHeader, rec)
+		// A short record is padded rather than rejected: Jira omits trailing
+		// empty cells in some exports, and the columns that matter are indexed
+		// by name, not position.
+		for len(record) < len(head.names) {
+			record = append(record, "")
+		}
+
+		rw := row{header: head, cells: record}
 		summary := strings.TrimSpace(rw.first("summary"))
 		if summary == "" {
 			result.Diagnostics = append(result.Diagnostics, importers.Diagnostic{
-				Level: importers.DiagnosticWarning, Row: rowNumber, Message: "skipped row with empty Summary",
+				Level: importers.DiagnosticWarning, Row: rowNumber,
+				Message: "skipped row with empty Summary",
 			})
 			continue
 		}
 
-		issueKey := strings.TrimSpace(rw.first("issue key"))
-		if issueKey == "" {
+		key := strings.TrimSpace(rw.first("issue key"))
+		if key == "" {
 			result.Diagnostics = append(result.Diagnostics, importers.Diagnostic{
-				Level: importers.DiagnosticError, Row: rowNumber, Message: "Issue key is required for safe resume",
+				Level: importers.DiagnosticError, Row: rowNumber,
+				Message: "Issue key is required for safe resume",
+			})
+		} else if firstRow, exists := seenKeys[strings.ToLower(key)]; exists {
+			result.Diagnostics = append(result.Diagnostics, importers.Diagnostic{
+				Level: importers.DiagnosticError, Row: rowNumber,
+				Message: fmt.Sprintf("duplicate Issue key %q (first seen on row %d)", key, firstRow),
 			})
 		} else {
-			folded := strings.ToLower(issueKey)
-			if firstRow, exists := seenKeys[folded]; exists {
-				result.Diagnostics = append(result.Diagnostics, importers.Diagnostic{
-					Level: importers.DiagnosticError,
-					Row:   rowNumber,
-					Message: fmt.Sprintf(
-						"duplicate Issue key %q (first seen on row %d)", issueKey, firstRow,
-					),
-				})
-			} else {
-				seenKeys[folded] = rowNumber
-			}
+			seenKeys[strings.ToLower(key)] = rowNumber
 		}
 
-		browseURL := i.browseURL(issueKey)
-		body := jira2md.Convert(rw.first("description"))
-		if browseURL != "" {
-			link := fmt.Sprintf("[View original issue in Jira](%s)", browseURL)
-			if body != "" {
-				body += "\n\n" + link
-			} else {
-				body = link
-			}
-		}
-
-		issueType := rw.first("issue type")
-		pulseType, typeLabel := statusmap.MapIssueType(issueType)
-		labels := make([]string, 0)
-		labelSeen := map[string]struct{}{}
-		addLabel := func(name string) {
-			name = strings.TrimSpace(name)
-			key := strings.ToLower(name)
-			if name == "" {
-				return
-			}
-			if _, exists := labelSeen[key]; exists {
-				return
-			}
-			labelSeen[key] = struct{}{}
-			labels = append(labels, key)
-			if _, exists := result.Labels[key]; !exists {
-				result.Labels[key] = importers.Label{Name: name}
-			}
-		}
-		addLabel(typeLabel)
-		for _, value := range rw.all("labels") {
-			addLabel(value)
-		}
-		releases := rw.all("release")
-		if len(releases) == 0 {
-			releases = rw.all("fix version/s")
-		}
-		if len(releases) == 0 {
-			releases = rw.all("affects version/s")
-		}
-		for _, release := range releases {
-			if release = strings.TrimSpace(release); release != "" {
-				addLabel("Release: " + release)
-			}
-		}
-
-		assignee := strings.TrimSpace(rw.first("assignee"))
-		if strings.EqualFold(assignee, "unassigned") {
-			assignee = ""
-		}
-		assigneeEmail := ""
-		if assignee != "" {
-			assigneeEmail = firstNonEmpty(
-				rw.first("assignee email"),
-				rw.first("assignee email address"),
-			)
-			assigneeEmail = strings.TrimSpace(assigneeEmail)
-			result.Users[strings.ToLower(assignee)] = importers.User{Name: assignee, Email: assigneeEmail}
-		}
-
-		rowBytes, _ := json.Marshal(rec)
+		rowBytes, _ := json.Marshal(record)
 		rowHash := sha256.Sum256(rowBytes)
-		result.Issues = append(result.Issues, importers.Issue{
-			Key:           issueKey,
-			SourceRow:     rowNumber,
-			RowHash:       hex.EncodeToString(rowHash[:]),
-			Title:         summary,
-			BodyMarkdown:  body,
-			Status:        rw.first("status"),
-			AssigneeID:    assignee,
-			AssigneeEmail: assigneeEmail,
-			Priority:      statusmap.MapPriority(rw.first("priority")),
-			Type:          pulseType,
-			Labels:        labels,
-		})
+		row := i.parseRow(rw, rowNumber, hex.EncodeToString(rowHash[:]), key, summary, result)
+		rows = append(rows, row)
 	}
-	if len(result.Issues) == 0 {
-		return nil, fmt.Errorf("csv contains no importable issues")
-	}
-	result.SourceFingerprint = hex.EncodeToString(sourceHash.Sum(nil))
-	return result, nil
-}
-
-func normalizeHeader(header []string) ([]string, error) {
-	if len(header) == 0 {
-		return nil, fmt.Errorf("csv header is empty")
-	}
-	header[0] = strings.TrimPrefix(header[0], "\ufeff")
-	out := make([]string, len(header))
-	counts := map[string]int{}
-	allowedRepeated := map[string]bool{
-		"labels": true, "release": true, "fix version/s": true, "affects version/s": true,
-	}
-	for index, raw := range header {
-		name := strings.ToLower(strings.TrimSpace(raw))
-		if name == "" {
-			return nil, fmt.Errorf("csv header column %d is empty", index+1)
-		}
-		out[index] = name
-		counts[name]++
-		if counts[name] > 1 && !allowedRepeated[name] {
-			return nil, fmt.Errorf("duplicate csv header %q", raw)
-		}
-	}
-	if counts["summary"] == 0 {
-		return nil, fmt.Errorf(`csv is missing required "Summary" header`)
-	}
-	if counts["issue key"] == 0 {
-		return nil, fmt.Errorf(`csv is missing required "Issue key" header`)
-	}
-	return out, nil
+	return rows, nil
 }
 
 func (i *Importer) sourceURL() string {
@@ -258,40 +273,18 @@ func (i *Importer) browseURL(issueKey string) string {
 	return base + "/browse/" + url.PathEscape(issueKey)
 }
 
-type row map[string][]string
-
-func (r row) first(name string) string {
-	values := r[strings.ToLower(strings.TrimSpace(name))]
-	if len(values) == 0 {
-		return ""
-	}
-	return values[0]
-}
-
-func (r row) all(name string) []string {
-	return r[strings.ToLower(strings.TrimSpace(name))]
-}
-
-func makeRow(header, record []string) row {
-	rw := row{}
-	for index, name := range header {
-		if index >= len(record) {
-			break
-		}
-		value := record[index]
-		if strings.TrimSpace(value) == "" {
+// ignoredColumns lists the header names the importer never reads, so the plan
+// can tell the user exactly which Jira data is being left behind.
+func ignoredColumns(head *header) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, name := range head.names {
+		if strings.HasPrefix(name, "\x00") || columnsRead[name] || seen[name] {
 			continue
 		}
-		rw[name] = append(rw[name], value)
+		seen[name] = true
+		out = append(out, name)
 	}
-	return rw
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return value
-		}
-	}
-	return ""
+	sort.Strings(out)
+	return out
 }

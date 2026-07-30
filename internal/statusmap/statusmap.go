@@ -17,13 +17,30 @@ const (
 	Done       PulseStatus = "done"
 )
 
+// All returns every Pulse workflow status, in workflow order.
+func All() []PulseStatus {
+	return []PulseStatus{Backlog, Todo, InProgress, QA, Release, Done}
+}
+
+// Parse resolves a user-supplied status name (as accepted by --skip-status and
+// --only-status) to a Pulse status.
+func Parse(name string) (PulseStatus, bool) {
+	n := normalize(name)
+	for _, status := range All() {
+		if normalize(string(status)) == n {
+			return status, true
+		}
+	}
+	return "", false
+}
+
 func Map(name string) PulseStatus {
 	n := normalize(name)
 
 	switch n {
 	case "backlog", "open", "new":
 		return Backlog
-	case "to_do", "todo", "ready", "selected_for_development":
+	case "to_do", "todo", "ready", "selected_for_development", "reopened":
 		return Todo
 	case "in_progress", "inprogress", "progress", "doing", "started", "active", "development", "in_development":
 		return InProgress
@@ -39,7 +56,8 @@ func Map(name string) PulseStatus {
 	switch {
 	case strings.Contains(n, "progress"), strings.Contains(n, "doing"):
 		return InProgress
-	case strings.Contains(n, "review"), strings.Contains(n, "qa"), strings.Contains(n, "test"):
+	case strings.Contains(n, "review"), hasToken(n, "qa"), hasToken(n, "test"),
+		hasToken(n, "testing"), hasToken(n, "qc"):
 		return QA
 	case hasToken(n, "done"), hasToken(n, "complete"), hasToken(n, "completed"),
 		hasToken(n, "closed"), strings.Contains(n, "resolv"):
@@ -49,6 +67,28 @@ func Map(name string) PulseStatus {
 	default:
 		return Backlog
 	}
+}
+
+// resolutionIsOpen reports whether a Jira resolution value means "still open".
+// Jira writes an explicit placeholder in some exports rather than leaving the
+// cell empty, and those placeholders must not be read as "finished".
+func resolutionIsOpen(resolution string) bool {
+	switch normalize(resolution) {
+	case "", "unresolved", "none", "_", "n/a", "na", "null":
+		return true
+	}
+	return false
+}
+
+// MapWithResolution maps a Jira status, letting a resolution close the issue.
+// A Jira issue carrying any resolution is finished, whatever its status column
+// says — some workflows resolve without renaming the status.
+func MapWithResolution(status, resolution string) (mapped PulseStatus, overridden bool) {
+	mapped = Map(status)
+	if mapped == Done || resolutionIsOpen(resolution) {
+		return mapped, false
+	}
+	return Done, true
 }
 
 func normalize(s string) string {
@@ -69,7 +109,7 @@ func hasToken(s, tok string) bool {
 func MapPriority(input string) importers.IssuePriority {
 	n := strings.ToLower(strings.TrimSpace(input))
 	switch {
-	case n == "" || n == "lowest" || n == "trivial":
+	case n == "":
 		return importers.PriorityNoPriority
 	case n == "highest" || n == "blocker" || n == "critical" ||
 		strings.Contains(n, "highest") || strings.Contains(n, "urgent") || strings.Contains(n, "critical"):
@@ -78,11 +118,29 @@ func MapPriority(input string) importers.IssuePriority {
 		return importers.PriorityHigh
 	case n == "medium" || n == "normal" || strings.Contains(n, "medium") || strings.Contains(n, "normal"):
 		return importers.PriorityMedium
-	case n == "low" || n == "minor" || strings.Contains(n, "low"):
+	// Jira ships five priorities against Pulse's four. Lowest and Trivial fold
+	// into Low rather than no_priority so "deprioritised" stays distinguishable
+	// from "never triaged" (an empty cell).
+	case n == "low" || n == "minor" || n == "lowest" || n == "trivial" ||
+		strings.Contains(n, "lowest") || strings.Contains(n, "low") || strings.Contains(n, "trivial"):
 		return importers.PriorityLow
 	default:
 		return importers.PriorityNoPriority
 	}
+}
+
+// IsEpicType reports whether a Jira issue type names an epic.
+func IsEpicType(jiraType string) bool {
+	return strings.EqualFold(strings.TrimSpace(jiraType), "epic")
+}
+
+// IsSubTaskType reports whether a Jira issue type names a sub-task.
+func IsSubTaskType(jiraType string) bool {
+	switch normalize(jiraType) {
+	case "sub_task", "subtask", "sub_bug", "technical_task", "sub_task_bug":
+		return true
+	}
+	return strings.HasPrefix(normalize(jiraType), "sub_")
 }
 
 func MapIssueType(jiraType string) (importers.IssueType, string) {

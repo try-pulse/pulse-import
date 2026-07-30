@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/try-pulse/pulse-import/internal/pulseapi"
 )
@@ -150,7 +151,7 @@ func TestClient_CreateIssueAndUpload(t *testing.T) {
 		t.Fatalf("body=%v", issueBody)
 	}
 
-	doc, err := c.UploadMainDoc(context.Background(), "iss1", "T", []byte(`[{"type":"p","children":[{"text":"hi"}]}]`))
+	doc, err := c.UploadMainDoc(context.Background(), "issue", "iss1", "T", []byte(`[{"type":"p","children":[{"text":"hi"}]}]`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,7 +173,7 @@ func TestClient_UploadRequiresID(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	_, err := mustClient(t, srv.URL, "tok", "ws").UploadMainDoc(context.Background(), "iss1", "T", []byte(`[]`))
+	_, err := mustClient(t, srv.URL, "tok", "ws").UploadMainDoc(context.Background(), "issue", "iss1", "T", []byte(`[]`))
 	if err == nil || !strings.Contains(err.Error(), "missing document id") {
 		t.Fatalf("err=%v", err)
 	}
@@ -226,7 +227,7 @@ func TestClient_ListEndpointsAndLabel(t *testing.T) {
 			})
 		case r.URL.Path == "/projects":
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"data": []pulseapi.Project{{ID: "p1", Name: "App", TeamID: "t1"}},
+				"data": []pulseapi.Project{{ID: "p1", Title: "App", TeamID: "t1"}},
 			})
 		case r.URL.Path == "/teams/t1/labels" && r.Method == http.MethodGet:
 			if r.URL.Query().Get("entity_type") != "issue" || r.URL.Query().Get("archived") != "false" {
@@ -341,7 +342,7 @@ func TestAPIError_Error(t *testing.T) {
 
 func TestClient_UploadContentWrapAndSanitize(t *testing.T) {
 	t.Parallel()
-	var uploadName string
+	var uploadName, uploadContentType string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/issues":
@@ -350,6 +351,7 @@ func TestClient_UploadContentWrapAndSanitize(t *testing.T) {
 			_ = r.ParseMultipartForm(1 << 20)
 			if f := r.MultipartForm.File["file"]; len(f) > 0 {
 				uploadName = f[0].Filename
+				uploadContentType = f[0].Header.Get("Content-Type")
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"content": pulseapi.Document{ID: "d9", Title: "T"},
@@ -365,12 +367,42 @@ func TestClient_UploadContentWrapAndSanitize(t *testing.T) {
 	if err != nil || issue.ID != "i9" {
 		t.Fatalf("%v %v", issue, err)
 	}
-	doc, err := c.UploadMainDoc(context.Background(), "i9", "Weird Title!!! 你好", []byte(`[]`))
+	doc, err := c.UploadMainDoc(context.Background(), "issue", "i9", "Weird Title!!! 你好", []byte(`[]`))
 	if err != nil || doc.ID != "d9" {
 		t.Fatalf("%v %v", doc, err)
 	}
-	if uploadName == "" || !strings.HasSuffix(uploadName, ".json") {
+	if uploadName == "" || !strings.HasSuffix(uploadName, ".txt") {
 		t.Fatalf("filename=%q", uploadName)
+	}
+	// Pulse decides whether a document opens in the Plate editor from the stored
+	// content type. Anything outside {text/plain, application/json} — including
+	// multipart's application/octet-stream default — renders the imported
+	// description as an opaque download instead of a document.
+	if uploadContentType != "text/plain" {
+		t.Fatalf("part Content-Type=%q, want text/plain", uploadContentType)
+	}
+}
+
+func TestTruncateForAPIRespectsByteLimits(t *testing.T) {
+	t.Parallel()
+	// Pulse validates title length in bytes, so 150 Persian characters (300
+	// bytes) must be cut even though the rune count is under the 200 limit.
+	persian := strings.Repeat("م", 150)
+	if !pulseapi.ExceedsAPIBytes(persian, pulseapi.MaxTitleBytes) {
+		t.Fatal("expected 300 bytes to exceed the 200-byte title limit")
+	}
+	got := pulseapi.TruncateForAPI(persian, pulseapi.MaxTitleBytes)
+	if len(got) > pulseapi.MaxTitleBytes {
+		t.Fatalf("truncated to %d bytes", len(got))
+	}
+	if !utf8.ValidString(got) {
+		t.Fatal("truncation split a rune")
+	}
+	if got != strings.Repeat("م", 100) {
+		t.Fatalf("want 100 whole runes, got %d runes", utf8.RuneCountInString(got))
+	}
+	if ascii := pulseapi.TruncateForAPI("short", pulseapi.MaxTitleBytes); ascii != "short" {
+		t.Fatalf("unchanged input mutated: %q", ascii)
 	}
 }
 
@@ -520,7 +552,7 @@ func TestCurrentPulseAPIContractFixtures(t *testing.T) {
 	if issue, err := client.GetIssue(ctx, "issue-1"); err != nil || issue.ID != "issue-1" {
 		t.Fatalf("issue=%+v err=%v", issue, err)
 	}
-	if document, err := client.UploadMainDoc(ctx, "issue-1", "Fix login", []byte(`[]`)); err != nil || document.ID != "document-1" {
+	if document, err := client.UploadMainDoc(ctx, "issue", "issue-1", "Fix login", []byte(`[]`)); err != nil || document.ID != "document-1" {
 		t.Fatalf("document=%+v err=%v", document, err)
 	}
 }
