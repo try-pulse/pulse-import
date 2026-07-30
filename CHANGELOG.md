@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-30
+
 ### Added
 
 - Import Jira epics as Pulse projects and file their issues into them (`--epics label` keeps the old label-only behaviour)
@@ -23,6 +25,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `--concurrency` (default 4) with wave ordering that still guarantees parents are created before children
 - `--assignee`, `--skip-comments`, `--skip-labels`, `--skip-relations`, `--strict-labels`, `--no-migrated-label`
 - Jira wiki support for tables, nested and mixed lists, `{quote}`, strikethrough, underline, superscript/subscript, `{code:lang}`, user mentions and attachment macros
+
+### Changed
+
+- **Breaking:** the resume journal is now version 2. A state file written by 0.2.x is rejected with an explanatory error; finish that import with the older binary, or delete the state file and re-import into an empty team.
+- **Breaking:** labels past Pulse's ten-per-issue ceiling are now dropped least-meaningful-first with a warning instead of failing preflight. Use `--strict-labels` for the old behaviour.
+- **Breaking:** assignees are matched against the target team's members instead of the whole workspace, because Pulse rejects any other assignee. Some names that previously "matched" (and then failed at create time) are now reported as unmatched in the plan.
+- Requires a pulse-api that returns `main_doc_id` on project responses; without it a project's Main Doc cannot be reconciled after an interrupted upload.
+- Issues are created in ascending source-key order rather than CSV order, so Pulse identifiers line up with the Jira keys in a fresh team.
 
 ### Fixed
 
