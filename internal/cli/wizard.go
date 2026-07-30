@@ -190,13 +190,16 @@ func wizardSource(
 		state.revisitSource = false
 		if nonInteractiveRun {
 			if state.source.ImporterID == "" {
-				return fmt.Errorf("Which service would you like to import from?: required in non-interactive mode (pass --importer)")
+				return fmt.Errorf("%s: required in non-interactive mode (pass --importer)",
+					"Which service would you like to import from?")
 			}
 			if state.source.FilePath == "" {
-				return fmt.Errorf("Path to Jira CSV export: required in non-interactive mode (pass --file)")
+				return fmt.Errorf("%s: required in non-interactive mode (pass --file)",
+					"Path to Jira CSV export")
 			}
 			if state.source.JiraURL == "" {
-				return fmt.Errorf("Jira base URL: required in non-interactive mode (pass --jira-url)")
+				return fmt.Errorf("%s: required in non-interactive mode (pass --jira-url)",
+					"Jira base URL")
 			}
 		} else {
 			// Revisit with answers already filled → force every Source field again.

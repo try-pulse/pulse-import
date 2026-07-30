@@ -191,12 +191,7 @@ func runSourceForm(
 	}
 	// Multi-group form always shows every field; `force` only affects the sequential path.
 
-	answers := sourceAnswers{
-		ImporterID: defaults.ImporterID,
-		FilePath:   defaults.FilePath,
-		JiraURL:    defaults.JiraURL,
-		IsCloud:    defaults.IsCloud,
-	}
+	answers := sourceAnswers(defaults)
 	if answers.ImporterID == "" && len(importerOptions) == 1 {
 		answers.ImporterID = importerOptions[0].Value
 	}
@@ -299,12 +294,7 @@ func runSourceFormSequential(
 	defaults sourceDefaults,
 	force bool,
 ) (sourceAnswers, error) {
-	answers := sourceAnswers{
-		ImporterID: defaults.ImporterID,
-		FilePath:   defaults.FilePath,
-		JiraURL:    defaults.JiraURL,
-		IsCloud:    defaults.IsCloud,
-	}
+	answers := sourceAnswers(defaults)
 	var err error
 	if answers.ImporterID == "" && len(importerOptions) == 1 {
 		answers.ImporterID = importerOptions[0].Value
