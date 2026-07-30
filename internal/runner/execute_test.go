@@ -735,3 +735,49 @@ func TestCommentUnknownIsReconciledAcrossRuns(t *testing.T) {
 		t.Fatalf("comments = %v, want [one two]", got)
 	}
 }
+
+// A project's Main Doc upload whose response was lost must be reconciled from
+// main_doc_id on the project, not re-uploaded — a second upload would leave an
+// orphan document attached to nothing.
+func TestAmbiguousProjectMainDocUploadIsReconciled(t *testing.T) {
+	t.Parallel()
+	api := newFakePulse()
+	first := true
+	api.uploadHook = func(entityType, entityID string) (*pulseapi.Document, error) {
+		if entityType == "project" && first {
+			first = false
+			api.mainDocs[entityID] = "doc-landed"
+			return nil, apiError(http.StatusBadGateway, "", "bad gateway")
+		}
+		return nil, nil
+	}
+
+	story := issue("ENG-2", "Child")
+	story.EpicKey = "ENG-1"
+	data := source(story)
+	data.Projects = []importers.Project{{
+		Key: "ENG-1", Title: "Epic", RowHash: "hash-epic", SourceRow: 2, BodyMarkdown: "epic body",
+	}}
+
+	state := statePath(t)
+	result, err := execute(t, api, prepare(t, api, data), state)
+	if err != nil {
+		t.Fatalf("execute: %v (errors %v)", err, result.Errors)
+	}
+	// Before main_doc_id was exposed on a project, this upload could not be
+	// reconciled and was recorded as a failure.
+	if result.FailedMainDocs != 0 || result.CreatedMainDocs != 1 {
+		t.Fatalf("result = %+v; the lost response should have been reconciled from main_doc_id", result)
+	}
+	if uploads := api.callCount("UploadMainDoc"); uploads != 1 {
+		t.Fatalf("UploadMainDoc called %d times, want 1", uploads)
+	}
+
+	// And a resume must not upload a second, orphan document.
+	if _, err := execute(t, api, prepare(t, api, data), state); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	if uploads := api.callCount("UploadMainDoc"); uploads != 1 {
+		t.Fatalf("resume uploaded again (%d calls); that would orphan a document", uploads)
+	}
+}

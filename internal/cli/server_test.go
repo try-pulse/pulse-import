@@ -182,6 +182,22 @@ func (f *fakeServer) handle(w http.ResponseWriter, r *http.Request) {
 		f.Deleted = append(f.Deleted, "issue:"+id)
 		write(http.StatusOK, map[string]string{"message": "deleted"})
 
+	case strings.HasPrefix(r.URL.Path, "/projects/") && r.Method == http.MethodGet:
+		id := strings.TrimPrefix(r.URL.Path, "/projects/")
+		project, ok := f.Projects[id]
+		if !ok {
+			write(http.StatusNotFound, map[string]string{"code": "NOT_FOUND"})
+			return
+		}
+		copied := map[string]any{}
+		for key, value := range project {
+			copied[key] = value
+		}
+		if doc := f.MainDocs[id]; doc != "" {
+			copied["main_doc_id"] = doc
+		}
+		write(http.StatusOK, map[string]any{"project": copied})
+
 	case strings.HasPrefix(r.URL.Path, "/projects/") && r.Method == http.MethodDelete:
 		id := strings.TrimPrefix(r.URL.Path, "/projects/")
 		delete(f.Projects, id)

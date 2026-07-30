@@ -357,9 +357,10 @@ type Team struct {
 // the API has no `name` on a project, and reading the wrong key silently left
 // every project unnamed.
 type Project struct {
-	ID     string `json:"id"`
-	Title  string `json:"title"`
-	TeamID string `json:"team_id"`
+	ID        string  `json:"id"`
+	Title     string  `json:"title"`
+	TeamID    string  `json:"team_id"`
+	MainDocID *string `json:"main_doc_id,omitempty"`
 }
 
 type TeamMember struct {

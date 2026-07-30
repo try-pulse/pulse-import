@@ -584,11 +584,14 @@ func (e *executor) mainDocID(ctx context.Context, kind importstate.Kind, entityI
 		return "", fmt.Errorf("no entity id recorded")
 	}
 	if kind == importstate.KindProject {
-		// Pulse's project payload does not expose main_doc_id, so a project
-		// document cannot be reconciled after an ambiguous upload; treat it as
-		// absent and let the upload be retried (it creates a new version rather
-		// than a duplicate main doc).
-		return "", nil
+		project, err := e.runner.API.GetProject(ctx, entityID)
+		if err != nil {
+			return "", err
+		}
+		if project.MainDocID == nil {
+			return "", nil
+		}
+		return *project.MainDocID, nil
 	}
 	issue, err := e.runner.API.GetIssue(ctx, entityID)
 	if err != nil {

@@ -292,6 +292,9 @@ func (f *fakePulse) GetProject(_ context.Context, projectID string) (*pulseapi.P
 		return nil, apiError(http.StatusNotFound, "NOT_FOUND", "Project not found")
 	}
 	copied := *project
+	if docID := f.mainDocs[projectID]; docID != "" {
+		copied.MainDocID = &docID
+	}
 	return &copied, nil
 }
 

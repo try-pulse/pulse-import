@@ -34,6 +34,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **An archived Pulse label no longer aborts the whole import.** Pulse's label uniqueness index spans archived rows, so creating a label whose name was held by an archived one returned 409; the archived label is now unarchived and reused
 - **Match assignees against the target team, not the workspace.** Pulse rejects an assignee who is not a member of the issue's team or a parent team, so every affected create failed; `--self-assign` and `--map-user` are now validated in preflight
 - A failed phase no longer marks an item complete, so a resume retries exactly the work that is still owed
+- Reconcile a project's Main Doc from `main_doc_id` after an ambiguous upload, so a resume cannot leave an orphan document
 - Report 403s as the missing Pulse permission with a way forward instead of a bare `pulse api 403`
 - Offer only active workspace memberships when picking a workspace
 - Keep fix-versions and affects-versions in separate label namespaces

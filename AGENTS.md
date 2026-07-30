@@ -95,6 +95,10 @@ Do not "simplify" the code that handles them.
    `estimate_settings`); anything else is rejected as `INVALID_ESTIMATE`.
 9. **`reporter`, `creator` and `created_at` cannot be set.** They are recorded in
    the Main Doc instead. Do not "fix" this by inventing fields.
+10. **`main_doc_id` is returned on both issues and projects**, which is what makes
+    an ambiguous Main Doc upload reconcilable instead of producing an orphan
+    document on the next run. It requires pulse-api ≥ the commit that added it to
+    `ProjectResponse`.
 
 ## Execution invariants
 
