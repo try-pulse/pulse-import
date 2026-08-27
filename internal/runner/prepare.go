@@ -289,9 +289,12 @@ func (r *Runner) prepareCycles(
 		issues []importers.Issue
 	}
 	candidates := map[string]*candidate{}
-	order := []string{}
 	issueCycles := map[string]string{}
 	stripped := map[string]string{}
+	tooShort := map[string]bool{}
+	// Short-name warnings are held back until the mode gates below pass: when
+	// every sprint falls back to labels anyway, the blanket warning covers it.
+	var shortWarnings []Diagnostic
 	for _, issue := range issues {
 		if len(issue.Sprints) == 0 {
 			continue
@@ -304,29 +307,34 @@ func (r *Runner) prepareCycles(
 		sprint := issue.Sprints[len(issue.Sprints)-1]
 		name := strings.TrimSpace(sprint.Name)
 		if len([]rune(name)) < 2 {
-			plan.Warnings = append(plan.Warnings, Diagnostic{
-				Key: issue.Key, Row: issue.SourceRow,
-				Message: fmt.Sprintf(
-					"sprint %q cannot become a cycle (Pulse requires at least 2 characters); it stays a label",
-					name,
-				),
-			})
+			if !tooShort[name] {
+				tooShort[name] = true
+				shortWarnings = append(shortWarnings, Diagnostic{
+					Key: issue.Key, Row: issue.SourceRow,
+					Message: fmt.Sprintf(
+						"sprint %q cannot become a cycle (Pulse requires at least 2 characters); it stays a label",
+						name,
+					),
+				})
+			}
 			continue
 		}
+		// The key is folded from the TRUNCATED name — the name Pulse will
+		// store — so a re-run matches the cycle it created last time even for
+		// a sprint name past the 200-byte cap.
+		name = pulseapi.TruncateForAPI(name, pulseapi.MaxTitleBytes)
 		key := strings.ToLower(name)
 		entry := candidates[key]
 		if entry == nil {
-			entry = &candidate{plan: &CyclePlan{
-				Key: key, Name: pulseapi.TruncateForAPI(name, pulseapi.MaxTitleBytes),
-			}}
+			entry = &candidate{plan: &CyclePlan{Key: key, Name: name}}
 			candidates[key] = entry
-			order = append(order, key)
 		}
 		entry.issues = append(entry.issues, issue)
 		issueCycles[strings.ToLower(issue.Key)] = key
 		stripped[strings.ToLower(issue.Key)] = sprint.LabelKey
 	}
 	if len(candidates) == 0 {
+		plan.Warnings = append(plan.Warnings, shortWarnings...)
 		return nil, nil, nil
 	}
 
@@ -355,8 +363,14 @@ func (r *Runner) prepareCycles(
 		existingByName[strings.ToLower(strings.TrimSpace(cycle.Name))] = cycle
 	}
 
-	created := 0
+	plan.Warnings = append(plan.Warnings, shortWarnings...)
+	order := make([]string, 0, len(candidates))
+	for key := range candidates {
+		order = append(order, key)
+	}
 	sort.Strings(order)
+
+	created := 0
 	for _, key := range order {
 		entry := candidates[key]
 		if cycle, ok := existingByName[key]; ok {
@@ -378,13 +392,12 @@ func (r *Runner) prepareCycles(
 			entry.plan.StartDate, entry.plan.EndDate = cycleWindow(entry.issues, opts.Now)
 			created++
 		}
-		entry.plan.Issues = len(entry.issues)
 		plan.Cycles = append(plan.Cycles, *entry.plan)
 	}
 	if created > 0 {
 		plan.Warnings = append(plan.Warnings, Diagnostic{Message: fmt.Sprintf(
-			"%d cycle(s) will be created as planned, with dates approximated from issue timestamps "+
-				"(Jira's CSV export carries no sprint dates); complete finished ones in Pulse afterwards",
+			"%d cycle(s) will be created with status \"planned\" and dates approximated from issue "+
+				"timestamps (Jira's CSV export carries no sprint dates); complete finished ones in Pulse afterwards",
 			created,
 		)})
 	}
@@ -733,7 +746,7 @@ func dropRelationCycles(plan *Plan) {
 	// edge that closes a cycle and looks again. Every pass removes an edge,
 	// so it terminates.
 	for {
-		closing := findCycleEdge(edges, removed)
+		closing := findClosingEdge(edges, removed)
 		if closing == nil {
 			break
 		}
@@ -750,28 +763,30 @@ func dropRelationCycles(plan *Plan) {
 	if len(removed) == 0 {
 		return
 	}
-	// Apply the drops back onto each item's lists.
-	rebuilt := map[*PreparedItem]bool{}
+	// Apply the drops back onto each item's lists. Indices refer to the
+	// original, still-unmodified lists.
+	type slot struct {
+		blockedBy bool
+		index     int
+	}
+	removedSlots := map[*PreparedItem]map[slot]bool{}
 	for e := range removed {
-		rebuilt[e.item] = true
-	}
-	keep := func(item *PreparedItem, blockedBy bool, index int) bool {
-		for e := range removed {
-			if e.item == item && e.blockedBy == blockedBy && e.index == index {
-				return false
-			}
+		slots := removedSlots[e.item]
+		if slots == nil {
+			slots = map[slot]bool{}
+			removedSlots[e.item] = slots
 		}
-		return true
+		slots[slot{e.blockedBy, e.index}] = true
 	}
-	for item := range rebuilt {
+	for item, slots := range removedSlots {
 		var blocks, blockedBy []string
 		for index, target := range item.Blocks {
-			if keep(item, false, index) {
+			if !slots[slot{false, index}] {
 				blocks = append(blocks, target)
 			}
 		}
 		for index, target := range item.BlockedBy {
-			if keep(item, true, index) {
+			if !slots[slot{true, index}] {
 				blockedBy = append(blockedBy, target)
 			}
 		}
@@ -779,10 +794,11 @@ func dropRelationCycles(plan *Plan) {
 	}
 }
 
-// findCycleEdge runs a DFS over the still-present edges and returns the first
-// edge, in deterministic order, whose traversal reaches a node already on the
-// stack — the edge that closes a cycle. It returns nil for an acyclic graph.
-func findCycleEdge(edges []*blockEdge, removed map[*blockEdge]bool) *blockEdge {
+// findClosingEdge runs a DFS over the still-present edges and returns the
+// first edge, in deterministic order, whose traversal reaches a node already
+// on the stack — the edge that closes a cycle. It returns nil for an acyclic
+// graph.
+func findClosingEdge(edges []*blockEdge, removed map[*blockEdge]bool) *blockEdge {
 	adjacency := map[string][]*blockEdge{}
 	nodes := map[string]bool{}
 	for _, e := range edges {
@@ -1122,7 +1138,8 @@ func hashPlan(plan *Plan, labelNames map[string]string) string {
 		Fingerprint: plan.SourceFingerprint, Labels: labelNames,
 	}
 	// Cycle names are part of the plan's identity; their approximated dates
-	// are not, so a resume does not trip over freshly derived timestamps.
+	// are not, so the hash stays stable for the same CSV regardless of when
+	// it is computed.
 	for _, cycle := range plan.Cycles {
 		payload.Cycles = append(payload.Cycles, cycle.Key)
 	}

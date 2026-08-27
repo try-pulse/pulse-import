@@ -100,6 +100,12 @@ Do not "simplify" the code that handles them.
     an ambiguous Main Doc upload reconcilable instead of producing an orphan
     document on the next run. It requires pulse-api ≥ the commit that added it to
     `ProjectResponse`.
+11. **Cycles are leaf-team only, need both dates, and refuse issues once
+    completed.** `POST /cycles` requires `start_date` strictly before `end_date`
+    and rejects a team that has sub-teams; an issue cannot be assigned to a
+    completed cycle. `GET /cycles/team/:id` returns a bare JSON array, and cycle
+    names are **not** unique — which is why `ensureCycles` reuses by name
+    best-effort and, unlike labels, has no 409 branch.
 
 ## Execution invariants
 

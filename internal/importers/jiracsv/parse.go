@@ -117,9 +117,6 @@ func (i *Importer) parseLabels(rw row, p *parsed) {
 		add("Affects: "+value, importers.LabelKindAffectsVersion)
 	}
 	for _, value := range rw.all("sprint") {
-		if value = strings.TrimSpace(value); value == "" {
-			continue
-		}
 		add("Sprint: "+value, importers.LabelKindSprint)
 		p.sprints = append(p.sprints, value)
 	}

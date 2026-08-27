@@ -145,6 +145,19 @@ func TestEpicMode(t *testing.T) {
 	}
 }
 
+func TestSprintMode(t *testing.T) {
+	t.Parallel()
+	if got, err := sprintMode(Options{}); err != nil || got != runner.SprintModeCycle {
+		t.Fatalf("default = %q err=%v", got, err)
+	}
+	if got, err := sprintMode(Options{Sprints: "label"}); err != nil || got != runner.SprintModeLabel {
+		t.Fatalf("label = %q err=%v", got, err)
+	}
+	if _, err := sprintMode(Options{Sprints: "banana"}); err == nil {
+		t.Fatal("expected an error")
+	}
+}
+
 func TestLabelPolicy(t *testing.T) {
 	t.Parallel()
 	if got := labelPolicy(Options{}); got != runner.LabelPolicyDrop {

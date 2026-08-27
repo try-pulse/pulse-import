@@ -3,6 +3,7 @@ package runner_test
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -89,6 +90,26 @@ func planWarnings(plan *runner.Plan) string {
 		parts = append(parts, diagnostic.Message)
 	}
 	return strings.Join(parts, " | ")
+}
+
+func planLabelNames(plan *runner.Plan) []string {
+	var names []string
+	for _, label := range plan.Labels {
+		names = append(names, label.Name)
+	}
+	return names
+}
+
+// withSprints wires an issue through the sprint machinery the way the jiracsv
+// importer does: one "Sprint: …" label per sprint plus the Sprints refs.
+func withSprints(data *importers.ImportResult, issueIndex int, names ...string) {
+	issue := &data.Issues[issueIndex]
+	for _, name := range names {
+		key := strings.ToLower("Sprint: " + name)
+		data.Labels[key] = importers.Label{Name: "Sprint: " + name, Kind: importers.LabelKindSprint}
+		issue.Labels = append(issue.Labels, key)
+		issue.Sprints = append(issue.Sprints, importers.SprintRef{Name: name, LabelKey: key})
+	}
 }
 
 // Pulse rejects an assignee who is not in the issue's team or a parent team, so
@@ -721,26 +742,6 @@ func TestLargeImportWarnsAboutNotificationFanout(t *testing.T) {
 	}
 }
 
-// withSprints wires an issue through the sprint machinery the way the jiracsv
-// importer does: one "Sprint: …" label per sprint plus the Sprints refs.
-func withSprints(data *importers.ImportResult, issueIndex int, names ...string) {
-	issue := &data.Issues[issueIndex]
-	for _, name := range names {
-		key := strings.ToLower("Sprint: " + name)
-		data.Labels[key] = importers.Label{Name: "Sprint: " + name, Kind: importers.LabelKindSprint}
-		issue.Labels = append(issue.Labels, key)
-		issue.Sprints = append(issue.Sprints, importers.SprintRef{Name: name, LabelKey: key})
-	}
-}
-
-func planLabelNames(plan *runner.Plan) []string {
-	var names []string
-	for _, label := range plan.Labels {
-		names = append(names, label.Name)
-	}
-	return names
-}
-
 func TestLastSprintBecomesCycleAndEarlierSprintsStayLabels(t *testing.T) {
 	t.Parallel()
 	data := source(issue("ENG-1", "Issue in two sprints"))
@@ -821,6 +822,73 @@ func TestExistingPlannedCycleIsReused(t *testing.T) {
 	})
 	data := source(issue("ENG-1", "Issue in a sprint"))
 	withSprints(data, 0, "Sprint 1")
+
+	plan := prepare(t, api, data)
+	if len(plan.Cycles) != 1 || plan.Cycles[0].ExistingID != "cycle-1" || plan.Cycles[0].Create {
+		t.Fatalf("cycles = %+v", plan.Cycles)
+	}
+}
+
+func TestCycleListingFailureFallsBackToLabels(t *testing.T) {
+	t.Parallel()
+	api := newFakePulse()
+	api.listCyclesHook = func(string) ([]pulseapi.Cycle, error) {
+		return nil, apiError(http.StatusNotFound, "NOT_FOUND", "no cycles here")
+	}
+	data := source(issue("ENG-1", "Issue in a sprint"))
+	withSprints(data, 0, "Sprint 1")
+
+	plan := prepare(t, api, data)
+
+	item := itemFor(t, plan, "ENG-1")
+	if item.CycleKey != "" || len(plan.Cycles) != 0 {
+		t.Fatalf("item=%+v cycles=%+v", item, plan.Cycles)
+	}
+	if !strings.Contains(strings.Join(item.LabelKeys, "|"), "sprint: sprint 1") {
+		t.Fatalf("sprint label should be kept: %v", item.LabelKeys)
+	}
+	if !strings.Contains(planWarnings(plan), "sprints will be imported as labels") {
+		t.Fatalf("warnings: %s", planWarnings(plan))
+	}
+}
+
+func TestCycleWindowComesFromIssueTimestamps(t *testing.T) {
+	t.Parallel()
+	created := time.Date(2026, 3, 2, 9, 0, 0, 0, time.UTC)
+	updated := time.Date(2026, 3, 20, 17, 0, 0, 0, time.UTC)
+	first := issue("ENG-1", "Oldest issue")
+	first.CreatedAt = &created
+	second := issue("ENG-2", "Freshest issue")
+	second.UpdatedAt = &updated
+	data := source(first, second)
+	withSprints(data, 0, "Sprint 1")
+	withSprints(data, 1, "Sprint 1")
+
+	plan := prepare(t, newFakePulse(), data)
+
+	if len(plan.Cycles) != 1 {
+		t.Fatalf("cycles = %+v", plan.Cycles)
+	}
+	cycle := plan.Cycles[0]
+	if !cycle.StartDate.Equal(created) || !cycle.EndDate.Equal(updated) {
+		t.Fatalf("window = %s..%s, want %s..%s",
+			cycle.StartDate, cycle.EndDate, created, updated)
+	}
+}
+
+// A sprint name past Pulse's 200-byte cap is stored truncated, so the plan's
+// cycle key must fold the truncated name — otherwise a re-run never matches
+// the cycle it created last time and duplicates it.
+func TestOverlongSprintNameMatchesItsTruncatedCycleOnRerun(t *testing.T) {
+	t.Parallel()
+	long := strings.Repeat("s", 250)
+	stored := pulseapi.TruncateForAPI(long, pulseapi.MaxTitleBytes)
+	api := newFakePulse()
+	api.cycles = append(api.cycles, pulseapi.Cycle{
+		ID: "cycle-1", Name: stored, Status: "planned", TeamID: teamID,
+	})
+	data := source(issue("ENG-1", "Issue in a sprint"))
+	withSprints(data, 0, long)
 
 	plan := prepare(t, api, data)
 	if len(plan.Cycles) != 1 || plan.Cycles[0].ExistingID != "cycle-1" || plan.Cycles[0].Create {

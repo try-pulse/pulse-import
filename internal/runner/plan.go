@@ -103,8 +103,6 @@ type CyclePlan struct {
 	// export, so they are approximated from the member issues' timestamps.
 	StartDate time.Time
 	EndDate   time.Time
-	// Issues counts the plan items that will join this cycle.
-	Issues int
 }
 
 // PreparedItem is one entity to create, fully resolved except for references to
