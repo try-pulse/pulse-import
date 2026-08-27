@@ -786,7 +786,8 @@ func labelPermissionError(wrapped, cause error) error {
 	return &PermissionError{
 		Action:     "creating team labels",
 		Permission: "labels:create",
-		Remedy: "Pulse only lets a manager of the team or a workspace owner/admin manage labels. " +
+		Remedy: "By default Pulse lets a manager of the team or a workspace owner/admin manage labels, " +
+			"but workspaces with custom roles can differ — what matters is the labels:create permission. " +
 			"Re-run with --skip-labels to import without labels, or ask an admin to run the import.",
 		Cause: wrapped,
 	}

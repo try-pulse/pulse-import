@@ -536,6 +536,9 @@ func (c *Client) ListUserOptions(ctx context.Context) ([]UserOption, error) {
 func (c *Client) CountTeamIssues(ctx context.Context, teamID string) (int64, error) {
 	query := url.Values{}
 	query.Set("limit", "1")
+	// Facets default to on and cost a Meilisearch aggregation per bucket;
+	// this call only wants pagination.total.
+	query.Set("include_facets", "false")
 	query.Set("filters[team_id][operator]", "eq")
 	query.Set("filters[team_id][value]", teamID)
 	out, err := get[struct {
@@ -831,6 +834,10 @@ const (
 	MaxTitleBytes = 200
 	MaxLabelBytes = 50
 	MaxTextBytes  = 4000
+	// MaxDocumentBytes is pulse-api's hard cap on a document upload body; an
+	// oversized upload is refused with 413 CONTENT_BODY_TOO_LARGE before the
+	// request is even parsed.
+	MaxDocumentBytes = 10 << 20
 )
 
 // TruncateForAPI shortens s to at most limit bytes without splitting a rune.

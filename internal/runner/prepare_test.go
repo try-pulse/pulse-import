@@ -2,6 +2,7 @@ package runner_test
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -633,6 +634,90 @@ func TestRelationsToIssuesOutsideTheImportAreDropped(t *testing.T) {
 	}
 	if !strings.Contains(planWarnings(plan), "ENG-404") {
 		t.Fatalf("warnings: %s", planWarnings(plan))
+	}
+}
+
+// Pulse rejects a cycle in the blocks graph (400 on the PUT that closes it),
+// so preflight has to break cycles instead of letting the link pass fail at
+// the very end of the import.
+func TestDependencyCycleIsBrokenInPreflight(t *testing.T) {
+	t.Parallel()
+	first := issue("ENG-1", "First issue")
+	first.Relations = []importers.Relation{{Kind: importers.RelationBlocks, TargetKey: "ENG-2"}}
+	second := issue("ENG-2", "Second issue")
+	second.Relations = []importers.Relation{{Kind: importers.RelationBlocks, TargetKey: "ENG-3"}}
+	third := issue("ENG-3", "Third issue")
+	third.Relations = []importers.Relation{{Kind: importers.RelationBlocks, TargetKey: "ENG-1"}}
+
+	plan := prepare(t, newFakePulse(), source(first, second, third))
+
+	kept := 0
+	for _, key := range []string{"ENG-1", "ENG-2", "ENG-3"} {
+		kept += len(itemFor(t, plan, key).Blocks)
+	}
+	if kept != 2 {
+		t.Fatalf("kept %d blocks links, want 2 (one edge of the cycle dropped)", kept)
+	}
+	if plan.RelationCount != 2 {
+		t.Fatalf("RelationCount = %d, want 2", plan.RelationCount)
+	}
+	if !strings.Contains(planWarnings(plan), "dependency cycle") {
+		t.Fatalf("warnings: %s", planWarnings(plan))
+	}
+}
+
+// Jira's export states each link twice — "blocks" on one row and
+// "is blocked by" on the other. Both describe the same directed edge, so the
+// pair must not be mistaken for a cycle.
+func TestMirroredBlockLinkIsNotACycle(t *testing.T) {
+	t.Parallel()
+	first := issue("ENG-1", "Blocker")
+	first.Relations = []importers.Relation{{Kind: importers.RelationBlocks, TargetKey: "ENG-2"}}
+	second := issue("ENG-2", "Blocked")
+	second.Relations = []importers.Relation{{Kind: importers.RelationBlockedBy, TargetKey: "ENG-1"}}
+
+	plan := prepare(t, newFakePulse(), source(first, second))
+
+	if blocks := itemFor(t, plan, "ENG-1").Blocks; len(blocks) != 1 {
+		t.Fatalf("blocks = %v", blocks)
+	}
+	if blockedBy := itemFor(t, plan, "ENG-2").BlockedBy; len(blockedBy) != 1 {
+		t.Fatalf("blockedBy = %v", blockedBy)
+	}
+	if strings.Contains(planWarnings(plan), "cycle") {
+		t.Fatalf("mirrored link flagged as a cycle: %s", planWarnings(plan))
+	}
+}
+
+func TestSelfBlockLinkIsDropped(t *testing.T) {
+	t.Parallel()
+	first := issue("ENG-1", "Blocks itself")
+	first.Relations = []importers.Relation{{Kind: importers.RelationBlocks, TargetKey: "ENG-1"}}
+
+	plan := prepare(t, newFakePulse(), source(first))
+
+	if blocks := itemFor(t, plan, "ENG-1").Blocks; len(blocks) != 0 {
+		t.Fatalf("blocks = %v", blocks)
+	}
+	if !strings.Contains(planWarnings(plan), "self-referential") {
+		t.Fatalf("warnings: %s", planWarnings(plan))
+	}
+}
+
+func TestLargeImportWarnsAboutNotificationFanout(t *testing.T) {
+	t.Parallel()
+	var issues []importers.Issue
+	for i := 1; i <= 26; i++ {
+		issues = append(issues, issue(fmt.Sprintf("ENG-%d", i), fmt.Sprintf("Issue %d", i)))
+	}
+	plan := prepare(t, newFakePulse(), source(issues...))
+	if !strings.Contains(planWarnings(plan), "notifications") {
+		t.Fatalf("warnings: %s", planWarnings(plan))
+	}
+
+	small := prepare(t, newFakePulse(), source(issue("ENG-1", "Only issue")))
+	if strings.Contains(planWarnings(small), "notifications") {
+		t.Fatalf("small import should stay quiet: %s", planWarnings(small))
 	}
 }
 

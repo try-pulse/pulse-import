@@ -118,6 +118,8 @@ func (r *Runner) Prepare(ctx context.Context, data *importers.ImportResult, opts
 	referenced := referencedKeys(kept)
 	r.prepareProjects(data, opts, plan, referenced, labelNames)
 	r.prepareIssues(kept, opts, plan, users, labelNames)
+	dropRelationCycles(plan)
+	warnAboutNotificationFanout(plan)
 
 	sortItems(plan.Items)
 	plan.Hash = hashPlan(plan, labelNames)
@@ -452,6 +454,185 @@ func (r *Runner) prepareIssues(
 	}
 }
 
+// blockEdge is one directed "from blocks to" link, remembered with the item
+// and list slot it came from so a drop can be applied back to that item.
+type blockEdge struct {
+	item      *PreparedItem
+	blockedBy bool // held in item.BlockedBy rather than item.Blocks
+	index     int
+	from, to  string // lower-cased keys
+}
+
+func (e *blockEdge) target() string {
+	if e.blockedBy {
+		return e.item.BlockedBy[e.index]
+	}
+	return e.item.Blocks[e.index]
+}
+
+// dropRelationCycles removes blocking links that close a directed dependency
+// cycle. Pulse rejects a cycle in the blocks graph, so a closing link would
+// fail the link pass at the very end of the import; dropping it in preflight
+// keeps the rest of the graph and reports exactly which link was lost.
+func dropRelationCycles(plan *Plan) {
+	var edges []*blockEdge
+	for i := range plan.Items {
+		item := &plan.Items[i]
+		key := strings.ToLower(item.Key)
+		for index, target := range item.Blocks {
+			edges = append(edges, &blockEdge{
+				item: item, index: index, from: key, to: strings.ToLower(target),
+			})
+		}
+		for index, target := range item.BlockedBy {
+			edges = append(edges, &blockEdge{
+				item: item, blockedBy: true, index: index,
+				from: strings.ToLower(target), to: key,
+			})
+		}
+	}
+	if len(edges) == 0 {
+		return
+	}
+
+	removed := map[*blockEdge]bool{}
+	drop := func(e *blockEdge, message string) {
+		removed[e] = true
+		plan.RelationCount--
+		plan.Warnings = append(plan.Warnings, Diagnostic{
+			Key: e.item.Key, Row: e.item.Row, Message: message,
+		})
+	}
+
+	for _, e := range edges {
+		if e.from == e.to {
+			drop(e, "link to itself was dropped: Pulse rejects a self-referential dependency")
+		}
+	}
+
+	// Repeated DFS: each pass either proves the graph acyclic or drops the
+	// edge that closes a cycle and looks again. Every pass removes an edge,
+	// so it terminates.
+	for {
+		closing := findCycleEdge(edges, removed)
+		if closing == nil {
+			break
+		}
+		direction := "blocks"
+		if closing.blockedBy {
+			direction = "is-blocked-by"
+		}
+		drop(closing, fmt.Sprintf(
+			"%s link to %s was dropped: it closes a dependency cycle, which Pulse rejects",
+			direction, closing.target(),
+		))
+	}
+
+	if len(removed) == 0 {
+		return
+	}
+	// Apply the drops back onto each item's lists.
+	rebuilt := map[*PreparedItem]bool{}
+	for e := range removed {
+		rebuilt[e.item] = true
+	}
+	keep := func(item *PreparedItem, blockedBy bool, index int) bool {
+		for e := range removed {
+			if e.item == item && e.blockedBy == blockedBy && e.index == index {
+				return false
+			}
+		}
+		return true
+	}
+	for item := range rebuilt {
+		var blocks, blockedBy []string
+		for index, target := range item.Blocks {
+			if keep(item, false, index) {
+				blocks = append(blocks, target)
+			}
+		}
+		for index, target := range item.BlockedBy {
+			if keep(item, true, index) {
+				blockedBy = append(blockedBy, target)
+			}
+		}
+		item.Blocks, item.BlockedBy = blocks, blockedBy
+	}
+}
+
+// findCycleEdge runs a DFS over the still-present edges and returns the first
+// edge, in deterministic order, whose traversal reaches a node already on the
+// stack — the edge that closes a cycle. It returns nil for an acyclic graph.
+func findCycleEdge(edges []*blockEdge, removed map[*blockEdge]bool) *blockEdge {
+	adjacency := map[string][]*blockEdge{}
+	nodes := map[string]bool{}
+	for _, e := range edges {
+		if removed[e] {
+			continue
+		}
+		adjacency[e.from] = append(adjacency[e.from], e)
+		nodes[e.from], nodes[e.to] = true, true
+	}
+	ordered := make([]string, 0, len(nodes))
+	for node := range nodes {
+		ordered = append(ordered, node)
+	}
+	sort.Strings(ordered)
+
+	const (
+		unvisited = 0
+		onStack   = 1
+		finished  = 2
+	)
+	state := map[string]int{}
+	var visit func(node string) *blockEdge
+	visit = func(node string) *blockEdge {
+		state[node] = onStack
+		for _, e := range adjacency[node] {
+			switch state[e.to] {
+			case onStack:
+				return e
+			case unvisited:
+				if closing := visit(e.to); closing != nil {
+					return closing
+				}
+			}
+		}
+		state[node] = finished
+		return nil
+	}
+	for _, node := range ordered {
+		if state[node] == unvisited {
+			if closing := visit(node); closing != nil {
+				return closing
+			}
+		}
+	}
+	return nil
+}
+
+// warnAboutNotificationFanout flags the side effects Pulse attaches to every
+// write: inbox/notification events fan out per created issue and comment, and
+// Loop automations can trigger on them. There is no server-side switch to
+// suppress them for a bulk import, so a large plan deserves a heads-up.
+func warnAboutNotificationFanout(plan *Plan) {
+	const quietThreshold = 25
+	total := plan.CommentCount
+	for _, item := range plan.Items {
+		if item.Kind == importstate.KindIssue {
+			total++
+		}
+	}
+	if total <= quietThreshold {
+		return
+	}
+	plan.Warnings = append(plan.Warnings, Diagnostic{Message: fmt.Sprintf(
+		"this import will create %d issues/comments; Pulse sends notifications for each one "+
+			"and may trigger Loop automations — there is no way to suppress them for a bulk import",
+		total,
+	)})
+}
+
 func assigneeFor(issue importers.Issue, users map[string]UserResolution) *string {
 	key := strings.ToLower(strings.TrimSpace(issue.AssigneeID))
 	if key == "" {
@@ -496,6 +677,16 @@ func convertDoc(markdown, key string, row int, plan *Plan) []byte {
 	if err != nil {
 		plan.Errors = append(plan.Errors, Diagnostic{
 			Key: key, Row: row, Message: "convert main doc: " + err.Error(),
+		})
+		return nil
+	}
+	if len(plate) > pulseapi.MaxDocumentBytes {
+		plan.Errors = append(plan.Errors, Diagnostic{
+			Key: key, Row: row, Message: fmt.Sprintf(
+				"main doc is %.1f MiB; Pulse refuses uploads over %d MiB. "+
+					"Shorten this description in the export and re-run",
+				float64(len(plate))/(1<<20), pulseapi.MaxDocumentBytes>>20,
+			),
 		})
 		return nil
 	}

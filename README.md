@@ -224,8 +224,16 @@ different state file.
 - Jira issue keys must be present and unique.
 - Pulse allows at most 10 labels per issue; extra labels are dropped least-first
   with a warning (`--strict-labels` fails instead).
-- Creating labels needs team-manager or workspace-admin rights in Pulse; use
-  `--skip-labels` if you do not have them.
+- Creating labels needs the `labels:create` permission — by default team
+  managers and workspace owners/admins; workspaces with custom roles can
+  differ. Use `--skip-labels` if you do not have it.
+- Pulse sends notifications for every issue and comment an import creates, and
+  Loop automations can trigger on them; there is no server-side way to suppress
+  this for a bulk import. The plan warns about it on large imports.
+- Blocking links that would close a dependency cycle (which Pulse rejects) are
+  dropped in preflight with a warning naming the dropped link.
+- A Main Doc over Pulse's 10 MiB upload cap fails preflight with the offending
+  row, instead of a late 413 during the import.
 - Main Doc, comment and link failures are reported and produce a non-zero exit.
 
 ## Help
