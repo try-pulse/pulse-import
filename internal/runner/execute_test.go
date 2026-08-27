@@ -29,6 +29,58 @@ func execute(
 	return runner.New(api).Execute(context.Background(), plan, opts)
 }
 
+func TestSprintCycleIsCreatedPlannedAndAttached(t *testing.T) {
+	t.Parallel()
+	api := newFakePulse()
+	first := issue("ENG-1", "First in sprint")
+	second := issue("ENG-2", "Second in sprint")
+	data := source(first, second)
+	withSprints(data, 0, "Sprint 1")
+	withSprints(data, 1, "Sprint 1")
+
+	plan := prepare(t, api, data)
+	if !plan.Valid() {
+		t.Fatalf("errors: %s", planErrors(plan))
+	}
+
+	if _, err := execute(t, api, plan, statePath(t)); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if got := api.callCount("CreateCycle"); got != 1 {
+		t.Fatalf("CreateCycle calls = %d, want 1 shared cycle", got)
+	}
+	cycle := api.cycles[0]
+	if cycle.Status != "planned" || cycle.Name != "Sprint 1" {
+		t.Fatalf("cycle = %+v", cycle)
+	}
+	for _, title := range []string{"First in sprint", "Second in sprint"} {
+		created := api.issueByTitle(title)
+		if created == nil || created.CycleID == nil || *created.CycleID != cycle.ID {
+			t.Fatalf("issue %q not attached to the cycle: %+v", title, created)
+		}
+	}
+}
+
+func TestCycleCreationForbiddenExplainsTheWayOut(t *testing.T) {
+	t.Parallel()
+	api := newFakePulse()
+	api.createCycleHook = func(pulseapi.CreateCycleRequest) (*pulseapi.Cycle, error) {
+		return nil, apiError(http.StatusForbidden, "FORBIDDEN", "no cycle authority")
+	}
+	data := source(issue("ENG-1", "In a sprint"))
+	withSprints(data, 0, "Sprint 1")
+
+	plan := prepare(t, api, data)
+	_, err := execute(t, api, plan, statePath(t))
+	var permErr *runner.PermissionError
+	if !errors.As(err, &permErr) || permErr.Permission != "cycles:create" {
+		t.Fatalf("err = %v", err)
+	}
+	if !strings.Contains(permErr.Remedy, "--sprints label") {
+		t.Fatalf("remedy should offer --sprints label: %s", permErr.Remedy)
+	}
+}
+
 func TestExecuteCreatesTheWholeGraph(t *testing.T) {
 	t.Parallel()
 	api := newFakePulse().withMembers(teamID, member("user-1", "Jane", "Doe", "jane@acme.com"))

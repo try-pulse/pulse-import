@@ -357,6 +357,10 @@ func wizardReview(
 	if err != nil {
 		return nil, err
 	}
+	sprints, err := sprintMode(*opts)
+	if err != nil {
+		return nil, err
+	}
 
 	engine := runner.New(sess.client)
 	plan, err := engine.Prepare(ctx, state.data, runner.Options{
@@ -375,6 +379,8 @@ func wizardReview(
 		SkipLabels:       opts.SkipLabels,
 		SkipComments:     opts.SkipComments,
 		SkipRelations:    opts.SkipRelations,
+		Sprints:          sprints,
+		TeamHasChildren:  teamHasChildren(teams, state.teamID),
 		SkipStatuses:     skipStatuses,
 		OnlyStatuses:     onlyStatuses,
 		StaleAfter:       staleAfter,

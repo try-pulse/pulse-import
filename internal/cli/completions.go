@@ -14,6 +14,9 @@ func registerCompletions(cmd *cobra.Command) {
 	_ = cmd.RegisterFlagCompletionFunc("epics", cobra.FixedCompletions(
 		[]string{"project", "label"}, cobra.ShellCompDirectiveNoFileComp,
 	))
+	_ = cmd.RegisterFlagCompletionFunc("sprints", cobra.FixedCompletions(
+		[]string{"cycle", "label"}, cobra.ShellCompDirectiveNoFileComp,
+	))
 	_ = cmd.MarkFlagFilename("file", "csv")
 	_ = cmd.MarkFlagFilename("state-file", "jsonl")
 }

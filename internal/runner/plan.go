@@ -24,6 +24,18 @@ const (
 // unassigned" rather than "match this person".
 const SkipUser = "skip"
 
+// SprintMode decides what a Jira sprint becomes in Pulse.
+type SprintMode string
+
+const (
+	// SprintModeCycle maps each issue's most recent sprint onto a Pulse cycle,
+	// creating missing cycles as planned; earlier sprints stay labels.
+	SprintModeCycle SprintMode = "cycle"
+	// SprintModeLabel keeps the pre-cycle behaviour: every sprint is a
+	// "Sprint: …" label.
+	SprintModeLabel SprintMode = "label"
+)
+
 type Options struct {
 	ImporterID  string
 	APIURL      string
@@ -46,6 +58,11 @@ type Options struct {
 	SkipLabels       bool
 	SkipComments     bool
 	SkipRelations    bool
+
+	Sprints SprintMode
+	// TeamHasChildren records whether the target team has sub-teams. Pulse only
+	// allows cycles on leaf teams, so sprints fall back to labels otherwise.
+	TeamHasChildren bool
 
 	// SkipStatuses and OnlyStatuses filter which issues are imported at all.
 	SkipStatuses map[statusmap.PulseStatus]bool
@@ -75,6 +92,21 @@ type LabelPlan struct {
 	Create     bool
 }
 
+// CyclePlan is one Pulse cycle an import will reuse or create for a sprint.
+type CyclePlan struct {
+	// Key is the folded sprint name, referenced by PreparedItem.CycleKey.
+	Key        string
+	Name       string
+	ExistingID string
+	Create     bool
+	// StartDate and EndDate are required by Pulse but absent from Jira's CSV
+	// export, so they are approximated from the member issues' timestamps.
+	StartDate time.Time
+	EndDate   time.Time
+	// Issues counts the plan items that will join this cycle.
+	Issues int
+}
+
 // PreparedItem is one entity to create, fully resolved except for references to
 // other items in the same plan, which only get ids at execution time.
 type PreparedItem struct {
@@ -88,6 +120,8 @@ type PreparedItem struct {
 	Project pulseapi.CreateProjectRequest
 
 	LabelKeys []string
+	// CycleKey references the CyclePlan the issue joins, by folded sprint name.
+	CycleKey  string
 	PlateJSON []byte
 
 	// ParentKey and EpicKey reference other items by source key.
@@ -118,6 +152,7 @@ type Plan struct {
 
 	Items  []PreparedItem
 	Labels []LabelPlan
+	Cycles []CyclePlan
 
 	Warnings []Diagnostic
 	Errors   []Diagnostic
@@ -157,6 +192,16 @@ type UserResolution struct {
 
 func (p *Plan) Valid() bool {
 	return p != nil && len(p.Errors) == 0
+}
+
+func (p *Plan) CyclesToCreate() int {
+	count := 0
+	for _, cycle := range p.Cycles {
+		if cycle.Create {
+			count++
+		}
+	}
+	return count
 }
 
 func (p *Plan) MainDocCount() int {

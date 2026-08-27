@@ -110,7 +110,9 @@ type parsed struct {
 	assigneeEmail string
 
 	labels    []labelRef
+	sprints   []string
 	dueDate   *time.Time
+	createdAt *time.Time
 	updatedAt *time.Time
 	points    *float64
 	estimateS *int

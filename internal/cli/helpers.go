@@ -153,6 +153,17 @@ func teamPath(teams []pulseapi.Team, teamID string) []string {
 	return path
 }
 
+// teamHasChildren reports whether any listed team names this one as its
+// parent. Pulse only allows cycles on leaf teams.
+func teamHasChildren(teams []pulseapi.Team, teamID string) bool {
+	for _, team := range teams {
+		if team.Parent != nil && team.Parent.ID == teamID {
+			return true
+		}
+	}
+	return false
+}
+
 func findTeam(teams []pulseapi.Team, teamID string) (pulseapi.Team, bool) {
 	for _, team := range teams {
 		if team.ID == teamID {

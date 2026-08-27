@@ -132,6 +132,7 @@ imported.
 | `--self-assign` | Shorthand for `--assignee self` |
 | `--map-user` | `--map-user "Jane Doe=<pulse-user-id\|email\|skip>"` (repeatable) |
 | `--epics` | `project` (default) or `label` |
+| `--sprints` | `cycle` (default): most recent sprint → Pulse cycle · `label`: every sprint stays a label |
 | `--skip-comments` | Do not import comments |
 | `--skip-labels` | Do not create or attach labels |
 | `--skip-relations` | Do not import blocks / blocked-by links |
@@ -167,7 +168,7 @@ imported.
 | Component/s | Label `Component: …` |
 | Fix Version/s | Label `Release: …` |
 | Affects Version/s | Label `Affects: …` |
-| Sprint | Label `Sprint: …` |
+| Sprint | **Cycle** — the most recent sprint becomes the issue's cycle, created as `planned` when missing; earlier sprints stay `Sprint: …` labels (`--sprints label` for labels only) |
 | Comments | Comments, prefixed with the original author and date |
 | Due date | Due date |
 | Story points / Original estimate | Estimate, snapped to the team's estimate scale |
@@ -227,6 +228,12 @@ different state file.
 - Creating labels needs the `labels:create` permission — by default team
   managers and workspace owners/admins; workspaces with custom roles can
   differ. Use `--skip-labels` if you do not have it.
+- Cycles need `cycles:create` (same default roles) and are only possible on
+  leaf teams; Jira's CSV export carries no sprint dates, so created cycles are
+  `planned` with dates approximated from the issues' timestamps — complete
+  finished ones in Pulse afterwards. A sprint whose name matches a completed
+  cycle stays a label (Pulse cannot add issues to a completed cycle). Like
+  labels, cycles are reused by name and never deleted by `rollback`.
 - Pulse sends notifications for every issue and comment an import creates, and
   Loop automations can trigger on them; there is no server-side way to suppress
   this for a bulk import. The plan warns about it on large imports.

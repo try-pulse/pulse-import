@@ -26,6 +26,8 @@ const migratedLabelKey = "migrated"
 
 type API interface {
 	ListTeamMembers(context.Context, string) ([]pulseapi.TeamMember, error)
+	ListTeamCycles(context.Context, string) ([]pulseapi.Cycle, error)
+	CreateCycle(context.Context, pulseapi.CreateCycleRequest) (*pulseapi.Cycle, error)
 	ListLabels(context.Context, string) ([]pulseapi.Label, error)
 	ListArchivedLabels(context.Context, string) ([]pulseapi.Label, error)
 	UnarchiveLabel(context.Context, string) (*pulseapi.Label, error)
@@ -64,6 +66,9 @@ func (r *Runner) Prepare(ctx context.Context, data *importers.ImportResult, opts
 	}
 	if opts.LabelPolicy == "" {
 		opts.LabelPolicy = LabelPolicyDrop
+	}
+	if opts.Sprints == "" {
+		opts.Sprints = SprintModeCycle
 	}
 	if opts.Concurrency <= 0 {
 		opts.Concurrency = 1
@@ -107,17 +112,23 @@ func (r *Runner) Prepare(ctx context.Context, data *importers.ImportResult, opts
 		plan.TeamIssueCount = count
 	}
 
+	kept := filterIssues(data.Issues, opts, plan)
+	issueCycles, strippedLabels, err := r.prepareCycles(ctx, kept, opts, plan)
+	if err != nil {
+		return nil, err
+	}
+
 	labels := collectLabels(data, opts)
+	pruneCycleSprintLabels(labels, data, kept, strippedLabels)
 	labelPlans, labelNames, err := r.prepareLabels(ctx, labels, plan)
 	if err != nil {
 		return nil, err
 	}
 	plan.Labels = labelPlans
 
-	kept := filterIssues(data.Issues, opts, plan)
 	referenced := referencedKeys(kept)
 	r.prepareProjects(data, opts, plan, referenced, labelNames)
-	r.prepareIssues(kept, opts, plan, users, labelNames)
+	r.prepareIssues(kept, opts, plan, users, labelNames, issueCycles, strippedLabels)
 	dropRelationCycles(plan)
 	warnAboutNotificationFanout(plan)
 
@@ -253,6 +264,198 @@ func referencedKeys(issues []importers.Issue) map[string]bool {
 	return out
 }
 
+// prepareCycles maps each issue's most recent sprint onto a Pulse cycle. It
+// returns the folded issue key → cycle key assignment and the folded issue
+// key → sprint label key that assignment replaces. Sprints that cannot become
+// a cycle (non-leaf team, completed cycle of the same name, a name Pulse
+// rejects, or an API that has no cycles) stay labels instead.
+func (r *Runner) prepareCycles(
+	ctx context.Context,
+	issues []importers.Issue,
+	opts Options,
+	plan *Plan,
+) (map[string]string, map[string]string, error) {
+	if opts.Sprints != SprintModeCycle {
+		return nil, nil, nil
+	}
+
+	issueKeys := map[string]bool{}
+	for _, issue := range issues {
+		issueKeys[strings.ToLower(issue.Key)] = true
+	}
+
+	type candidate struct {
+		plan   *CyclePlan
+		issues []importers.Issue
+	}
+	candidates := map[string]*candidate{}
+	order := []string{}
+	issueCycles := map[string]string{}
+	stripped := map[string]string{}
+	for _, issue := range issues {
+		if len(issue.Sprints) == 0 {
+			continue
+		}
+		// A sub-issue inherits its parent's cycle in Pulse; its sprint history
+		// stays on it as labels.
+		if issue.ParentKey != "" && issueKeys[strings.ToLower(issue.ParentKey)] {
+			continue
+		}
+		sprint := issue.Sprints[len(issue.Sprints)-1]
+		name := strings.TrimSpace(sprint.Name)
+		if len([]rune(name)) < 2 {
+			plan.Warnings = append(plan.Warnings, Diagnostic{
+				Key: issue.Key, Row: issue.SourceRow,
+				Message: fmt.Sprintf(
+					"sprint %q cannot become a cycle (Pulse requires at least 2 characters); it stays a label",
+					name,
+				),
+			})
+			continue
+		}
+		key := strings.ToLower(name)
+		entry := candidates[key]
+		if entry == nil {
+			entry = &candidate{plan: &CyclePlan{
+				Key: key, Name: pulseapi.TruncateForAPI(name, pulseapi.MaxTitleBytes),
+			}}
+			candidates[key] = entry
+			order = append(order, key)
+		}
+		entry.issues = append(entry.issues, issue)
+		issueCycles[strings.ToLower(issue.Key)] = key
+		stripped[strings.ToLower(issue.Key)] = sprint.LabelKey
+	}
+	if len(candidates) == 0 {
+		return nil, nil, nil
+	}
+
+	fallback := func(reason string) (map[string]string, map[string]string, error) {
+		plan.Warnings = append(plan.Warnings, Diagnostic{Message: reason})
+		return nil, nil, nil
+	}
+	if opts.TeamHasChildren {
+		return fallback(
+			"Pulse only allows cycles on leaf teams (without sub-teams); sprints will be imported as labels",
+		)
+	}
+	existing, err := r.API.ListTeamCycles(ctx, opts.TeamID)
+	if err != nil {
+		// A 404 means a pulse-api without cycles; a 403 a token that cannot
+		// even read them. Neither should sink the import.
+		if pulseapi.IsNotFound(err) || pulseapi.IsForbidden(err) {
+			return fallback(fmt.Sprintf(
+				"listing the team's cycles failed (%v); sprints will be imported as labels", err,
+			))
+		}
+		return nil, nil, fmt.Errorf("list team cycles: %w", err)
+	}
+	existingByName := map[string]pulseapi.Cycle{}
+	for _, cycle := range existing {
+		existingByName[strings.ToLower(strings.TrimSpace(cycle.Name))] = cycle
+	}
+
+	created := 0
+	sort.Strings(order)
+	for _, key := range order {
+		entry := candidates[key]
+		if cycle, ok := existingByName[key]; ok {
+			if cycle.Status == "completed" {
+				plan.Warnings = append(plan.Warnings, Diagnostic{Message: fmt.Sprintf(
+					"sprint %q matches a completed cycle, and Pulse cannot add issues to one; it stays a label",
+					entry.plan.Name,
+				)})
+				for _, issue := range entry.issues {
+					folded := strings.ToLower(issue.Key)
+					delete(issueCycles, folded)
+					delete(stripped, folded)
+				}
+				continue
+			}
+			entry.plan.ExistingID = cycle.ID
+		} else {
+			entry.plan.Create = true
+			entry.plan.StartDate, entry.plan.EndDate = cycleWindow(entry.issues, opts.Now)
+			created++
+		}
+		entry.plan.Issues = len(entry.issues)
+		plan.Cycles = append(plan.Cycles, *entry.plan)
+	}
+	if created > 0 {
+		plan.Warnings = append(plan.Warnings, Diagnostic{Message: fmt.Sprintf(
+			"%d cycle(s) will be created as planned, with dates approximated from issue timestamps "+
+				"(Jira's CSV export carries no sprint dates); complete finished ones in Pulse afterwards",
+			created,
+		)})
+	}
+	return issueCycles, stripped, nil
+}
+
+// cycleWindow approximates a sprint's window from its member issues: earliest
+// creation to latest update. Pulse requires both dates with start strictly
+// before end, and the CSV export carries no sprint dates to use instead.
+func cycleWindow(issues []importers.Issue, now time.Time) (time.Time, time.Time) {
+	var start, end time.Time
+	for _, issue := range issues {
+		for _, stamp := range []*time.Time{issue.CreatedAt, issue.UpdatedAt} {
+			if stamp == nil {
+				continue
+			}
+			if start.IsZero() || stamp.Before(start) {
+				start = *stamp
+			}
+			if end.IsZero() || stamp.After(end) {
+				end = *stamp
+			}
+		}
+	}
+	switch {
+	case start.IsZero() && end.IsZero():
+		start, end = now.AddDate(0, 0, -14), now
+	case start.IsZero():
+		start = end.AddDate(0, 0, -14)
+	case end.IsZero():
+		end = start.AddDate(0, 0, 14)
+	}
+	if !start.Before(end) {
+		end = start.AddDate(0, 0, 1)
+	}
+	return start, end
+}
+
+// pruneCycleSprintLabels removes sprint labels that no imported row still
+// references once cycle assignments replaced them, so the import does not
+// create labels nothing uses.
+func pruneCycleSprintLabels(
+	labels map[string]importers.Label,
+	data *importers.ImportResult,
+	kept []importers.Issue,
+	stripped map[string]string,
+) {
+	if len(stripped) == 0 {
+		return
+	}
+	referenced := map[string]bool{}
+	for _, issue := range kept {
+		strip := stripped[strings.ToLower(issue.Key)]
+		for _, key := range issue.Labels {
+			if key != strip {
+				referenced[key] = true
+			}
+		}
+	}
+	for _, project := range data.Projects {
+		for _, key := range project.Labels {
+			referenced[key] = true
+		}
+	}
+	for key, label := range labels {
+		if label.Kind == importers.LabelKindSprint && !referenced[key] {
+			delete(labels, key)
+		}
+	}
+}
+
 func (r *Runner) prepareProjects(
 	data *importers.ImportResult,
 	opts Options,
@@ -323,6 +526,8 @@ func (r *Runner) prepareIssues(
 	plan *Plan,
 	users map[string]UserResolution,
 	labelNames map[string]string,
+	issueCycles map[string]string,
+	strippedLabels map[string]string,
 ) {
 	// Only keys that actually became projects can be used as a project link.
 	projectKeys := map[string]bool{}
@@ -354,7 +559,17 @@ func (r *Runner) prepareIssues(
 			RowHash: issue.RowHash, Title: title, Wave: 1,
 		}
 
+		folded := strings.ToLower(issue.Key)
 		labelKeys := issue.Labels
+		if strip := strippedLabels[folded]; strip != "" {
+			trimmed := make([]string, 0, len(labelKeys))
+			for _, key := range labelKeys {
+				if key != strip {
+					trimmed = append(trimmed, key)
+				}
+			}
+			labelKeys = trimmed
+		}
 		if opts.SkipLabels {
 			labelKeys = nil
 		}
@@ -391,6 +606,10 @@ func (r *Runner) prepareIssues(
 			// because the server overwrites it.
 			projectID = nil
 			item.EpicKey = ""
+		} else {
+			// Sub-issues inherit their parent's cycle, so only top-level
+			// issues carry one.
+			item.CycleKey = issueCycles[folded]
 		}
 
 		item.Issue = pulseapi.CreateIssueRequest{
@@ -879,6 +1098,7 @@ func hashPlan(plan *Plan, labelNames map[string]string) string {
 		Issue     pulseapi.CreateIssueRequest
 		Project   pulseapi.CreateProjectRequest
 		LabelKeys []string
+		CycleKey  string
 		ParentKey string
 		EpicKey   string
 		Comments  int
@@ -895,16 +1115,22 @@ func hashPlan(plan *Plan, labelNames map[string]string) string {
 		SourceURL   string
 		Fingerprint string
 		Labels      map[string]string
+		Cycles      []string
 		Items       []itemHash
 	}{
 		Options: hashOptions, SourceURL: plan.SourceURL,
 		Fingerprint: plan.SourceFingerprint, Labels: labelNames,
 	}
+	// Cycle names are part of the plan's identity; their approximated dates
+	// are not, so a resume does not trip over freshly derived timestamps.
+	for _, cycle := range plan.Cycles {
+		payload.Cycles = append(payload.Cycles, cycle.Key)
+	}
 	for _, item := range plan.Items {
 		payload.Items = append(payload.Items, itemHash{
 			Key: item.Key, Kind: item.Kind, RowHash: item.RowHash,
 			Issue: item.Issue, Project: item.Project, LabelKeys: item.LabelKeys,
-			ParentKey: item.ParentKey, EpicKey: item.EpicKey,
+			CycleKey: item.CycleKey, ParentKey: item.ParentKey, EpicKey: item.EpicKey,
 			Comments: len(item.Comments), HasDoc: len(item.PlateJSON) > 0,
 		})
 	}

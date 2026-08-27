@@ -117,13 +117,20 @@ func (i *Importer) parseLabels(rw row, p *parsed) {
 		add("Affects: "+value, importers.LabelKindAffectsVersion)
 	}
 	for _, value := range rw.all("sprint") {
+		if value = strings.TrimSpace(value); value == "" {
+			continue
+		}
 		add("Sprint: "+value, importers.LabelKindSprint)
+		p.sprints = append(p.sprints, value)
 	}
 }
 
 func (i *Importer) parseDates(rw row, p *parsed) {
 	if due, ok := parseJiraTime(rw.first("due date")); ok {
 		p.dueDate = &due
+	}
+	if created, ok := parseJiraTime(rw.first("created")); ok {
+		p.createdAt = &created
 	}
 	if updated, ok := parseJiraTime(rw.first("updated")); ok {
 		p.updatedAt = &updated
@@ -336,6 +343,31 @@ func topLevelAncestor(start *parsed, lookup func(string) *parsed) (*parsed, int)
 	return nil, hops
 }
 
+// sprintRefs pairs each sprint name with the key its "Sprint: …" label was
+// registered under (register lower-cases the full label name), deduplicated
+// with order preserved so the last entry stays the most recent sprint.
+func sprintRefs(names []string) []importers.SprintRef {
+	if len(names) == 0 {
+		return nil
+	}
+	// Deduplicate keeping each sprint's LAST occurrence, so a repeated sprint
+	// still ends up in its most recent position.
+	refs := make([]importers.SprintRef, 0, len(names))
+	seen := map[string]bool{}
+	for i := len(names) - 1; i >= 0; i-- {
+		key := strings.ToLower("Sprint: " + names[i])
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		refs = append(refs, importers.SprintRef{Name: names[i], LabelKey: key})
+	}
+	for left, right := 0, len(refs)-1; left < right; left, right = left+1, right-1 {
+		refs[left], refs[right] = refs[right], refs[left]
+	}
+	return refs
+}
+
 // emit turns resolved rows into the importer's output model.
 func (i *Importer) emit(rows []*parsed, result *importers.ImportResult) {
 	epicsAsProjects := i.opts.Epics == EpicModeProject
@@ -389,7 +421,9 @@ func (i *Importer) emit(rows []*parsed, result *importers.ImportResult) {
 			DueDate:                 r.dueDate,
 			StoryPoints:             r.points,
 			OriginalEstimateSeconds: r.estimateS,
+			CreatedAt:               r.createdAt,
 			UpdatedAt:               r.updatedAt,
+			Sprints:                 sprintRefs(r.sprints),
 			Comments:                r.comments,
 		}
 		issue.IsEpic = r.isEpic

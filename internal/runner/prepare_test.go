@@ -721,6 +721,151 @@ func TestLargeImportWarnsAboutNotificationFanout(t *testing.T) {
 	}
 }
 
+// withSprints wires an issue through the sprint machinery the way the jiracsv
+// importer does: one "Sprint: …" label per sprint plus the Sprints refs.
+func withSprints(data *importers.ImportResult, issueIndex int, names ...string) {
+	issue := &data.Issues[issueIndex]
+	for _, name := range names {
+		key := strings.ToLower("Sprint: " + name)
+		data.Labels[key] = importers.Label{Name: "Sprint: " + name, Kind: importers.LabelKindSprint}
+		issue.Labels = append(issue.Labels, key)
+		issue.Sprints = append(issue.Sprints, importers.SprintRef{Name: name, LabelKey: key})
+	}
+}
+
+func planLabelNames(plan *runner.Plan) []string {
+	var names []string
+	for _, label := range plan.Labels {
+		names = append(names, label.Name)
+	}
+	return names
+}
+
+func TestLastSprintBecomesCycleAndEarlierSprintsStayLabels(t *testing.T) {
+	t.Parallel()
+	data := source(issue("ENG-1", "Issue in two sprints"))
+	withSprints(data, 0, "Sprint 1", "Sprint 2")
+
+	plan := prepare(t, newFakePulse(), data)
+
+	item := itemFor(t, plan, "ENG-1")
+	if item.CycleKey != "sprint 2" {
+		t.Fatalf("cycle key = %q", item.CycleKey)
+	}
+	if strings.Contains(strings.Join(item.LabelKeys, "|"), "sprint: sprint 2") {
+		t.Fatalf("current sprint should not stay a label: %v", item.LabelKeys)
+	}
+	if !strings.Contains(strings.Join(item.LabelKeys, "|"), "sprint: sprint 1") {
+		t.Fatalf("historical sprint should stay a label: %v", item.LabelKeys)
+	}
+	if len(plan.Cycles) != 1 || !plan.Cycles[0].Create || plan.Cycles[0].Name != "Sprint 2" {
+		t.Fatalf("cycles = %+v", plan.Cycles)
+	}
+	if !plan.Cycles[0].StartDate.Before(plan.Cycles[0].EndDate) {
+		t.Fatalf("cycle window invalid: %+v", plan.Cycles[0])
+	}
+	// The replaced sprint's label is not created at all.
+	if names := strings.Join(planLabelNames(plan), "|"); strings.Contains(names, "Sprint: Sprint 2") {
+		t.Fatalf("unused sprint label still planned: %s", names)
+	}
+}
+
+func TestSprintLabelModeKeepsEverySprintAsLabel(t *testing.T) {
+	t.Parallel()
+	data := source(issue("ENG-1", "Issue in a sprint"))
+	withSprints(data, 0, "Sprint 1")
+
+	plan := prepare(t, newFakePulse(), data, func(o *runner.Options) {
+		o.Sprints = runner.SprintModeLabel
+	})
+	if len(plan.Cycles) != 0 {
+		t.Fatalf("cycles = %+v", plan.Cycles)
+	}
+	item := itemFor(t, plan, "ENG-1")
+	if item.CycleKey != "" || !strings.Contains(strings.Join(item.LabelKeys, "|"), "sprint: sprint 1") {
+		t.Fatalf("item = %+v", item)
+	}
+}
+
+func TestCompletedCycleOfSameNameFallsBackToLabel(t *testing.T) {
+	t.Parallel()
+	api := newFakePulse()
+	api.cycles = append(api.cycles, pulseapi.Cycle{
+		ID: "cycle-done", Name: "Sprint 1", Status: "completed", TeamID: teamID,
+	})
+	data := source(issue("ENG-1", "Issue in a finished sprint"))
+	withSprints(data, 0, "Sprint 1")
+
+	plan := prepare(t, api, data)
+
+	item := itemFor(t, plan, "ENG-1")
+	if item.CycleKey != "" {
+		t.Fatalf("cycle key = %q, want none for a completed cycle", item.CycleKey)
+	}
+	if !strings.Contains(strings.Join(item.LabelKeys, "|"), "sprint: sprint 1") {
+		t.Fatalf("sprint label should be kept: %v", item.LabelKeys)
+	}
+	if len(plan.Cycles) != 0 {
+		t.Fatalf("cycles = %+v", plan.Cycles)
+	}
+	if !strings.Contains(planWarnings(plan), "completed cycle") {
+		t.Fatalf("warnings: %s", planWarnings(plan))
+	}
+}
+
+func TestExistingPlannedCycleIsReused(t *testing.T) {
+	t.Parallel()
+	api := newFakePulse()
+	api.cycles = append(api.cycles, pulseapi.Cycle{
+		ID: "cycle-1", Name: "Sprint 1", Status: "planned", TeamID: teamID,
+	})
+	data := source(issue("ENG-1", "Issue in a sprint"))
+	withSprints(data, 0, "Sprint 1")
+
+	plan := prepare(t, api, data)
+	if len(plan.Cycles) != 1 || plan.Cycles[0].ExistingID != "cycle-1" || plan.Cycles[0].Create {
+		t.Fatalf("cycles = %+v", plan.Cycles)
+	}
+}
+
+func TestNonLeafTeamImportsSprintsAsLabels(t *testing.T) {
+	t.Parallel()
+	data := source(issue("ENG-1", "Issue in a sprint"))
+	withSprints(data, 0, "Sprint 1")
+
+	plan := prepare(t, newFakePulse(), data, func(o *runner.Options) {
+		o.TeamHasChildren = true
+	})
+	item := itemFor(t, plan, "ENG-1")
+	if item.CycleKey != "" || len(plan.Cycles) != 0 {
+		t.Fatalf("item=%+v cycles=%+v", item, plan.Cycles)
+	}
+	if !strings.Contains(planWarnings(plan), "leaf teams") {
+		t.Fatalf("warnings: %s", planWarnings(plan))
+	}
+}
+
+func TestSubIssueKeepsSprintLabelInsteadOfCycle(t *testing.T) {
+	t.Parallel()
+	child := issue("ENG-2", "Sub in a sprint")
+	child.ParentKey = "ENG-1"
+	data := source(issue("ENG-1", "Parent"), child)
+	withSprints(data, 1, "Sprint 1")
+
+	plan := prepare(t, newFakePulse(), data)
+
+	item := itemFor(t, plan, "ENG-2")
+	if item.CycleKey != "" {
+		t.Fatalf("sub-issue should not carry a cycle: %+v", item)
+	}
+	if !strings.Contains(strings.Join(item.LabelKeys, "|"), "sprint: sprint 1") {
+		t.Fatalf("sub-issue should keep its sprint label: %v", item.LabelKeys)
+	}
+	if len(plan.Cycles) != 0 {
+		t.Fatalf("cycles = %+v", plan.Cycles)
+	}
+}
+
 func TestMigratedLabelIsAddedByDefaultAndCanBeDisabled(t *testing.T) {
 	t.Parallel()
 	t.Run("added", func(t *testing.T) {

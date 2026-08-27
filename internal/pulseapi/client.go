@@ -392,6 +392,7 @@ type Issue struct {
 	ProjectID    *string  `json:"project_id,omitempty"`
 	ParentID     *string  `json:"parent_id,omitempty"`
 	AssigneeID   *string  `json:"assignee_id,omitempty"`
+	CycleID      *string  `json:"cycle_id,omitempty"`
 	MainDocID    *string  `json:"main_doc_id,omitempty"`
 	BlocksIDs    []string `json:"blocks_ids,omitempty"`
 	BlockedByIDs []string `json:"blocked_by_ids,omitempty"`
@@ -407,9 +408,33 @@ type CreateIssueRequest struct {
 	ProjectID    *string    `json:"project_id,omitempty"`
 	ParentID     *string    `json:"parent_id,omitempty"`
 	AssigneeID   *string    `json:"assignee_id,omitempty"`
+	CycleID      *string    `json:"cycle_id,omitempty"`
 	TimeEstimate *int       `json:"time_estimate,omitempty"`
 	DueDate      *time.Time `json:"due_date,omitempty"`
 	LabelIDs     []string   `json:"label_ids,omitempty"`
+}
+
+// Cycle is a Pulse cycle (sprint). Issues can only join a cycle on their own
+// team, and never a completed one.
+type Cycle struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	Status    string    `json:"status"`
+	TeamID    string    `json:"team_id"`
+	StartDate time.Time `json:"start_date"`
+	EndDate   time.Time `json:"end_date"`
+}
+
+// CreateCycleRequest mirrors POST /cycles. Every field here is required by the
+// server: dates must satisfy start < end, and status must be planned, active
+// or completed (an active cycle must be unique, and a completed one cannot
+// take issues, so imports create planned cycles).
+type CreateCycleRequest struct {
+	Name      string    `json:"name"`
+	StartDate time.Time `json:"start_date"`
+	EndDate   time.Time `json:"end_date"`
+	Status    string    `json:"status"`
+	TeamID    string    `json:"team_id"`
 }
 
 // UpdateIssueRequest carries only the fields the importer sets after creation.
@@ -570,6 +595,30 @@ func (c *Client) CreateLabel(ctx context.Context, teamID string, req CreateLabel
 		return nil, fmt.Errorf("create label: empty response")
 	}
 	return &label, nil
+}
+
+// ListTeamCycles returns every cycle on a team. The endpoint responds with a
+// bare JSON array, unlike most Pulse list endpoints.
+func (c *Client) ListTeamCycles(ctx context.Context, teamID string) ([]Cycle, error) {
+	data, err := c.doRaw(ctx, http.MethodGet, "/cycles/team/"+url.PathEscape(teamID), nil)
+	if err != nil {
+		return nil, err
+	}
+	if len(data) == 0 || string(data) == "null" {
+		return nil, nil
+	}
+	return decode[[]Cycle](data)
+}
+
+func (c *Client) CreateCycle(ctx context.Context, req CreateCycleRequest) (*Cycle, error) {
+	cycle, err := post[Cycle](c, ctx, "/cycles", req)
+	if err != nil {
+		return nil, err
+	}
+	if cycle.ID == "" {
+		return nil, fmt.Errorf("create cycle: empty response")
+	}
+	return &cycle, nil
 }
 
 func (c *Client) CreateIssue(ctx context.Context, req CreateIssueRequest) (*Issue, error) {

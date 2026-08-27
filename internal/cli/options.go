@@ -25,6 +25,7 @@ type Options struct {
 	MapUser    []string
 
 	Epics         string
+	Sprints       string
 	SkipComments  bool
 	SkipLabels    bool
 	SkipRelations bool
@@ -86,6 +87,17 @@ func epicMode(opts Options) (jiracsv.EpicMode, error) {
 		return jiracsv.EpicModeLabel, nil
 	default:
 		return "", fmt.Errorf("--epics must be one of project, label (got %q)", opts.Epics)
+	}
+}
+
+func sprintMode(opts Options) (runner.SprintMode, error) {
+	switch strings.ToLower(strings.TrimSpace(opts.Sprints)) {
+	case "", string(runner.SprintModeCycle):
+		return runner.SprintModeCycle, nil
+	case string(runner.SprintModeLabel):
+		return runner.SprintModeLabel, nil
+	default:
+		return "", fmt.Errorf("--sprints must be one of cycle, label (got %q)", opts.Sprints)
 	}
 }
 

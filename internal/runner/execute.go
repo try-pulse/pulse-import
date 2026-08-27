@@ -52,6 +52,9 @@ func (r *Runner) Execute(ctx context.Context, plan *Plan, opts ExecuteOptions) (
 	if exec.labelIDs, err = r.ensureLabels(ctx, plan); err != nil {
 		return exec.result, err
 	}
+	if exec.cycleIDs, err = r.ensureCycles(ctx, plan); err != nil {
+		return exec.result, err
+	}
 
 	if err := exec.run(ctx); err != nil {
 		return exec.result, err
@@ -70,6 +73,7 @@ type executor struct {
 	opts     ExecuteOptions
 	journal  *importstate.Journal
 	labelIDs map[string]string
+	cycleIDs map[string]string
 
 	mu       sync.Mutex
 	result   *Result
@@ -292,6 +296,11 @@ func (e *executor) create(ctx context.Context, item PreparedItem) (string, error
 		for _, key := range item.LabelKeys {
 			if id := e.labelIDs[key]; id != "" {
 				request.LabelIDs = append(request.LabelIDs, id)
+			}
+		}
+		if item.CycleKey != "" {
+			if id := e.cycleIDs[item.CycleKey]; id != "" {
+				request.CycleID = &id
 			}
 		}
 	}
@@ -775,6 +784,65 @@ func (r *Runner) findLabel(ctx context.Context, teamID, name string) (string, bo
 			return "", false
 		}
 		return restored.ID, true
+	}
+	return "", false
+}
+
+// ensureCycles resolves every planned cycle to an id, creating the missing
+// ones as planned. Like labels, cycles are reused by name and never deleted by
+// rollback: outside issues may join a cycle the moment it exists.
+func (r *Runner) ensureCycles(ctx context.Context, plan *Plan) (map[string]string, error) {
+	mapping := map[string]string{}
+	for _, cycle := range plan.Cycles {
+		if cycle.ExistingID != "" {
+			mapping[cycle.Key] = cycle.ExistingID
+			continue
+		}
+		created, err := r.API.CreateCycle(ctx, pulseapi.CreateCycleRequest{
+			Name:      cycle.Name,
+			StartDate: cycle.StartDate,
+			EndDate:   cycle.EndDate,
+			Status:    "planned",
+			TeamID:    plan.Options.TeamID,
+		})
+		if err == nil {
+			mapping[cycle.Key] = created.ID
+			continue
+		}
+		if pulseapi.IsForbidden(err) {
+			return nil, &PermissionError{
+				Action:     "creating team cycles",
+				Permission: "cycles:create",
+				Remedy: "By default Pulse lets a manager of the team or a workspace owner/admin manage cycles, " +
+					"but workspaces with custom roles can differ. " +
+					"Re-run with --sprints label to import sprints as labels, or ask an admin to run the import.",
+				Cause: fmt.Errorf("create cycle %q: %w", cycle.Name, err),
+			}
+		}
+		if !pulseapi.IsAmbiguousWriteError(err) {
+			return nil, fmt.Errorf("create cycle %q: %w", cycle.Name, err)
+		}
+		// The create may have landed; look before creating a duplicate.
+		if id, found := r.findCycle(ctx, plan.Options.TeamID, cycle.Name); found {
+			mapping[cycle.Key] = id
+			continue
+		}
+		return nil, fmt.Errorf("create cycle %q had an unknown outcome: %w", cycle.Name, err)
+	}
+	return mapping, nil
+}
+
+// findCycle looks a cycle up by name, skipping completed ones because Pulse
+// refuses to add issues to those.
+func (r *Runner) findCycle(ctx context.Context, teamID, name string) (string, bool) {
+	cycles, err := r.API.ListTeamCycles(ctx, teamID)
+	if err != nil {
+		return "", false
+	}
+	for _, candidate := range cycles {
+		if strings.EqualFold(strings.TrimSpace(candidate.Name), name) && candidate.Status != "completed" {
+			return candidate.ID, true
+		}
 	}
 	return "", false
 }

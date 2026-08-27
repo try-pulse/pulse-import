@@ -9,13 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Import Jira sprints as Pulse cycles** (`--sprints cycle`, the new default). Each issue's most recent sprint becomes its cycle; earlier sprints stay `Sprint: …` labels, and sub-issues inherit the parent's cycle. Missing cycles are created as `planned` with dates approximated from the issues' timestamps (Jira's CSV export carries no sprint dates) and are reused by name on a resume; like labels, `rollback` never deletes them. Sprints fall back to labels when the target team is not a leaf team, when a same-named cycle is already completed, or when the API has no cycles — `--sprints label` restores the old behaviour entirely
+
 - **Break dependency cycles in preflight.** pulse-api now rejects a cycle in the blocks graph, so a Jira link set containing one failed the link pass at the very end of the import. The plan now drops the link that closes a cycle (and any self-referential link) with a warning naming it, and imports the rest of the graph
 - **Fail preflight on a Main Doc over Pulse's 10 MiB upload cap** with the offending row, instead of a late `413 CONTENT_BODY_TOO_LARGE` during the import
 - The review step warns on large imports that Pulse sends notifications for every created issue and comment and may trigger Loop automations; there is no server-side way to suppress them
 
 ### Changed
 
-- Permission guidance no longer states team-manager/workspace-admin as fact: Pulse resolves roles per workspace now (dynamic roles), so messages name the required permission (`labels:create`) and the default roles that hold it
+- Resuming a 0.4.x import with this version keeps its journal, but issues it already created stay without a cycle (cycles are applied at creation); the remainder of the run picks up the new sprint mapping. Pass `--sprints label` for the old behaviour end to end
+- Permission guidance no longer states team-manager/workspace-admin as fact: Pulse resolves roles per workspace now (dynamic roles), so messages name the required permission (`labels:create`, `cycles:create`) and the default roles that hold it
 - The team issue-count probe sends `include_facets=false`, skipping a needless server-side facet aggregation
 
 ## [0.4.0] - 2026-07-30

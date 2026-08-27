@@ -50,6 +50,10 @@ func printPlan(out io.Writer, plan *runner.Plan, dryRun bool) {
 		fmt.Fprintf(&body, " · %d unarchive", plan.LabelsToUnarchive())
 	}
 	body.WriteByte('\n')
+	if len(plan.Cycles) > 0 {
+		fmt.Fprintf(&body, "Cycles from sprints: %d create · %d reuse\n",
+			plan.CyclesToCreate(), len(plan.Cycles)-plan.CyclesToCreate())
+	}
 	fmt.Fprintf(&body, "Rows skipped: %d · Filtered out: %d\n", plan.SkippedRows, plan.FilteredIssues)
 
 	if styles.Enabled {

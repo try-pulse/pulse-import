@@ -228,6 +228,22 @@ func TestImportRealJiraAllFieldsExport(t *testing.T) {
 		}
 	})
 
+	t.Run("sprint history is kept in order with label keys", func(t *testing.T) {
+		story := issueByKey(t, result, "ENG-2")
+		if len(story.Sprints) != 2 {
+			t.Fatalf("sprints = %+v", story.Sprints)
+		}
+		if story.Sprints[0].Name != "Sprint 12" || story.Sprints[1].Name != "Sprint 13" {
+			t.Errorf("sprint order = %+v", story.Sprints)
+		}
+		if story.Sprints[1].LabelKey != "sprint: sprint 13" {
+			t.Errorf("label key = %q", story.Sprints[1].LabelKey)
+		}
+		if story.CreatedAt == nil {
+			t.Errorf("created stamp missing")
+		}
+	})
+
 	t.Run("provenance Pulse cannot store goes into the Main Doc", func(t *testing.T) {
 		story := issueByKey(t, result, "ENG-2")
 		for _, want := range []string{

@@ -125,6 +125,7 @@ Undo:
 		`Map a source user: --map-user "Jane Doe=<pulse-user-id|email|skip>" (repeatable)`)
 
 	flags.StringVar(&opts.Epics, "epics", "project", "How to import Jira epics: project or label")
+	flags.StringVar(&opts.Sprints, "sprints", "cycle", "How to import Jira sprints: cycle or label")
 	flags.BoolVar(&opts.SkipComments, "skip-comments", false, "Do not import comments")
 	flags.BoolVar(&opts.SkipLabels, "skip-labels", false, "Do not create or attach labels")
 	flags.BoolVar(&opts.SkipRelations, "skip-relations", false, "Do not import blocks/blocked-by links")
@@ -246,6 +247,9 @@ func runImport(cmd *cobra.Command, opts Options, deps Dependencies) error {
 	}
 	epics, err := epicMode(opts)
 	if err != nil {
+		return err
+	}
+	if _, err := sprintMode(opts); err != nil {
 		return err
 	}
 	skipStatuses, err := parseStatusFilter(opts.SkipStatus, "--skip-status")

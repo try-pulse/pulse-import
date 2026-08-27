@@ -44,6 +44,14 @@ const (
 	RelationBlockedBy = "blocked_by"
 )
 
+// SprintRef is one sprint the source issue passed through, paired with the key
+// its "Sprint: …" label registered under so a cycle mapping can strip exactly
+// that label.
+type SprintRef struct {
+	Name     string
+	LabelKey string
+}
+
 type Issue struct {
 	Key          string
 	SourceRow    int
@@ -74,8 +82,13 @@ type Issue struct {
 	StoryPoints *float64
 	// OriginalEstimateSeconds is Jira's time estimate, used for hour-scale teams.
 	OriginalEstimateSeconds *int
+	// CreatedAt is the source creation time, used to approximate cycle dates.
+	CreatedAt *time.Time
 	// UpdatedAt is the source last-updated time, used by staleness filters.
 	UpdatedAt *time.Time
+	// Sprints lists the sprints the issue passed through, oldest first; the
+	// last entry is the sprint the issue currently sits in.
+	Sprints []SprintRef
 
 	Comments  []Comment
 	Relations []Relation

@@ -27,6 +27,7 @@ type fakePulse struct {
 
 	teamMembers map[string][]pulseapi.TeamMember
 	labels      []pulseapi.Label
+	cycles      []pulseapi.Cycle
 	issues      map[string]*pulseapi.Issue
 	projects    map[string]*pulseapi.Project
 	mainDocs    map[string]string
@@ -39,6 +40,8 @@ type fakePulse struct {
 	uploadHook        func(entityType, entityID string) (*pulseapi.Document, error)
 	commentHook       func(issueID, text string) (*pulseapi.Comment, error)
 	createLabelHook   func(name string) (*pulseapi.Label, error)
+	createCycleHook   func(pulseapi.CreateCycleRequest) (*pulseapi.Cycle, error)
+	listCyclesHook    func(teamID string) ([]pulseapi.Cycle, error)
 	unarchiveHook     func(labelID string) (*pulseapi.Label, error)
 	listMembersHook   func(teamID string) ([]pulseapi.TeamMember, error)
 	updateIssueHook   func(issueID string) (*pulseapi.Issue, error)
@@ -223,13 +226,86 @@ func (f *fakePulse) CreateIssue(_ context.Context, req pulseapi.CreateIssueReque
 		}
 	}
 
+	if req.CycleID != nil && *req.CycleID != "" {
+		cycle := f.cycleByID(*req.CycleID)
+		if cycle == nil {
+			return nil, apiError(http.StatusBadRequest, "INVALID_ISSUE", "Cycle not found")
+		}
+		if cycle.TeamID != req.TeamID {
+			return nil, apiError(http.StatusBadRequest, "INVALID_ISSUE",
+				"Cycle must belong to the same team as the issue")
+		}
+		if cycle.Status == "completed" {
+			return nil, apiError(http.StatusBadRequest, "INVALID_ISSUE",
+				"Cannot assign issue to a completed cycle")
+		}
+	}
+
 	issue := &pulseapi.Issue{
 		ID: f.id("issue"), Title: req.Title, TeamID: req.TeamID,
 		Status: req.Status, Priority: req.Priority, Type: req.Type,
 		ProjectID: req.ProjectID, ParentID: req.ParentID, AssigneeID: req.AssigneeID,
+		CycleID: req.CycleID,
 	}
 	f.issues[issue.ID] = issue
 	return issue, nil
+}
+
+func (f *fakePulse) cycleByID(id string) *pulseapi.Cycle {
+	for i := range f.cycles {
+		if f.cycles[i].ID == id {
+			return &f.cycles[i]
+		}
+	}
+	return nil
+}
+
+func (f *fakePulse) ListTeamCycles(_ context.Context, teamID string) ([]pulseapi.Cycle, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.record("ListTeamCycles")
+	if f.listCyclesHook != nil {
+		return f.listCyclesHook(teamID)
+	}
+	var out []pulseapi.Cycle
+	for _, cycle := range f.cycles {
+		if cycle.TeamID == teamID {
+			out = append(out, cycle)
+		}
+	}
+	return out, nil
+}
+
+func (f *fakePulse) CreateCycle(_ context.Context, req pulseapi.CreateCycleRequest) (*pulseapi.Cycle, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.record("CreateCycle")
+	if f.createCycleHook != nil {
+		if cycle, err := f.createCycleHook(req); err != nil {
+			return cycle, err
+		}
+	}
+	if len([]rune(strings.TrimSpace(req.Name))) < 2 || len(req.Name) > 200 {
+		return nil, apiError(http.StatusBadRequest, "INVALID_CYCLE", "Cycle name out of range")
+	}
+	if req.StartDate.IsZero() || req.EndDate.IsZero() || !req.StartDate.Before(req.EndDate) {
+		return nil, apiError(http.StatusBadRequest, "INVALID_CYCLE",
+			"Start date must be before end date")
+	}
+	switch req.Status {
+	case "planned", "active", "completed":
+	default:
+		return nil, apiError(http.StatusBadRequest, "INVALID_CYCLE", "Unknown cycle status")
+	}
+	if req.TeamID == "" {
+		return nil, apiError(http.StatusBadRequest, "INVALID_CYCLE", "Cycle team is required")
+	}
+	cycle := pulseapi.Cycle{
+		ID: f.id("cycle"), Name: req.Name, Status: req.Status,
+		TeamID: req.TeamID, StartDate: req.StartDate, EndDate: req.EndDate,
+	}
+	f.cycles = append(f.cycles, cycle)
+	return &cycle, nil
 }
 
 func (f *fakePulse) UpdateIssue(_ context.Context, issueID string, req pulseapi.UpdateIssueRequest) (*pulseapi.Issue, error) {
