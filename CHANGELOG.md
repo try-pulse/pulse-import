@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-11-25
+
 - Record each comment attempt before sending it. Interrupted comments now pause for an explicit `--resolve-comment` decision, including when resuming older journals with an unknown comment.
 - Lock the state journal for the full import or rollback so concurrent processes cannot retry the same write.
 - Update Go and the terminal, synchronization, and YAML dependencies. GoReleaser now scans each compiled binary before packaging and publishing.
