@@ -4,7 +4,8 @@ Thanks for helping improve Pulse’s import CLI.
 
 ## Development setup
 
-Requirements: Go 1.25.8+, `make`, and optionally [golangci-lint](https://golangci-lint.run/).
+Requirements: Go 1.26.11+, `make`, and optionally [golangci-lint](https://golangci-lint.run/).
+For a GoReleaser snapshot, install the release scanner with `go install golang.org/x/vuln/cmd/govulncheck@v1.10.0`.
 
 ```bash
 git clone https://github.com/try-pulse/pulse-import.git

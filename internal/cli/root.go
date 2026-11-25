@@ -150,6 +150,8 @@ Undo:
 	flags.StringSliceVar(&opts.Adopt, "adopt", nil, "Resolve unknown create as SOURCE-KEY=PULSE-ID (repeatable)")
 	flags.StringSliceVar(&opts.RetryUnknown, "retry-unknown", nil,
 		"Explicitly retry an unknown source key (repeatable; duplicate risk)")
+	flags.StringVar(&opts.ResolveComment, "resolve-comment", "",
+		"Resolve an interrupted comment after inspecting Pulse: JIRA-KEY#NUMBER=posted or JIRA-KEY#NUMBER=retry")
 
 	cmd.SetVersionTemplate(fmt.Sprintf(
 		"{{.Name}} {{.Version}}\ncommit: %s\ndate: %s\n",
@@ -280,6 +282,10 @@ func runImport(cmd *cobra.Command, opts Options, deps Dependencies) error {
 	if err != nil {
 		return err
 	}
+	commentResolution, err := parseCommentResolution(opts.ResolveComment)
+	if err != nil {
+		return err
+	}
 	if opts.Concurrency < 1 {
 		return fmt.Errorf("--concurrency must be at least 1")
 	}
@@ -338,7 +344,7 @@ func runImport(cmd *cobra.Command, opts Options, deps Dependencies) error {
 	bar := newProgressBar(errOut, plan.TotalWrites())
 	result, runErr := engine.Execute(ctx, plan, runner.ExecuteOptions{
 		StateFile: stateFile, ContinueOnError: opts.Continue,
-		Adopt: adoptions, RetryUnknown: retryUnknown,
+		Adopt: adoptions, RetryUnknown: retryUnknown, ResolveComment: commentResolution,
 		OnProgress: func(progress runner.Progress) {
 			if bar == nil {
 				return

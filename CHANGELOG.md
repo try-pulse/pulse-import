@@ -5,6 +5,12 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+- Record each comment attempt before sending it. Interrupted comments now pause for an explicit `--resolve-comment` decision, including when resuming older journals with an unknown comment.
+- Lock the state journal for the full import or rollback so concurrent processes cannot retry the same write.
+- Update Go and the terminal, synchronization, and YAML dependencies. GoReleaser now scans each compiled binary before packaging and publishing.
+
 ## [0.5.0] - 2026-08-27
 
 ### Added

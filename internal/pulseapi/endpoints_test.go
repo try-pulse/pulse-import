@@ -44,8 +44,6 @@ func TestEndpointContracts(t *testing.T) {
 			})
 		case r.URL.Path == "/issues" && r.Method == http.MethodGet:
 			encode(map[string]any{"data": []any{}, "pagination": map[string]any{"total": 7}})
-		case r.URL.Path == "/comments" && r.Method == http.MethodGet:
-			encode(map[string]any{"data": []any{}, "pagination": map[string]any{"total": 3}})
 		case r.URL.Path == "/comments" && r.Method == http.MethodPost:
 			encode(map[string]any{"message": "ok", "comment": map[string]string{"id": "comment-1"}})
 		case r.URL.Path == "/projects" && r.Method == http.MethodPost:
@@ -95,13 +93,6 @@ func TestEndpointContracts(t *testing.T) {
 	t.Run("team issue count reads the pagination total", func(t *testing.T) {
 		total, err := client.CountTeamIssues(ctx, "team-1")
 		if err != nil || total != 7 {
-			t.Fatalf("total=%d err=%v", total, err)
-		}
-	})
-
-	t.Run("comment count reads the pagination total", func(t *testing.T) {
-		total, err := client.CountComments(ctx, "issue-1")
-		if err != nil || total != 3 {
 			t.Fatalf("total=%d err=%v", total, err)
 		}
 	})

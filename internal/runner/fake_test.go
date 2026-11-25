@@ -36,16 +36,15 @@ type fakePulse struct {
 	nextID      int
 
 	// Hooks inject faults. They run before the in-memory write.
-	createIssueHook   func(pulseapi.CreateIssueRequest) (*pulseapi.Issue, error)
-	uploadHook        func(entityType, entityID string) (*pulseapi.Document, error)
-	commentHook       func(issueID, text string) (*pulseapi.Comment, error)
-	createLabelHook   func(name string) (*pulseapi.Label, error)
-	createCycleHook   func(pulseapi.CreateCycleRequest) (*pulseapi.Cycle, error)
-	listCyclesHook    func(teamID string) ([]pulseapi.Cycle, error)
-	unarchiveHook     func(labelID string) (*pulseapi.Label, error)
-	listMembersHook   func(teamID string) ([]pulseapi.TeamMember, error)
-	updateIssueHook   func(issueID string) (*pulseapi.Issue, error)
-	countCommentsHook func(issueID string) (int64, error)
+	createIssueHook func(pulseapi.CreateIssueRequest) (*pulseapi.Issue, error)
+	uploadHook      func(entityType, entityID string) (*pulseapi.Document, error)
+	commentHook     func(issueID, text string) (*pulseapi.Comment, error)
+	createLabelHook func(name string) (*pulseapi.Label, error)
+	createCycleHook func(pulseapi.CreateCycleRequest) (*pulseapi.Cycle, error)
+	listCyclesHook  func(teamID string) ([]pulseapi.Cycle, error)
+	unarchiveHook   func(labelID string) (*pulseapi.Label, error)
+	listMembersHook func(teamID string) ([]pulseapi.TeamMember, error)
+	updateIssueHook func(issueID string) (*pulseapi.Issue, error)
 
 	calls map[string]int
 }
@@ -407,16 +406,6 @@ func (f *fakePulse) CreateComment(_ context.Context, req pulseapi.CreateCommentR
 	}
 	f.comments[req.TargetID] = append(f.comments[req.TargetID], req.Text)
 	return &pulseapi.Comment{ID: f.id("comment")}, nil
-}
-
-func (f *fakePulse) CountComments(_ context.Context, issueID string) (int64, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.record("CountComments")
-	if f.countCommentsHook != nil {
-		return f.countCommentsHook(issueID)
-	}
-	return int64(len(f.comments[issueID])), nil
 }
 
 func (f *fakePulse) CountTeamIssues(context.Context, string) (int64, error) {

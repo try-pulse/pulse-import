@@ -10,6 +10,9 @@ builds:
   - id: pulse-import
     main: ./cmd/pulse-import
     binary: pulse-import
+    hooks:
+      post:
+        - govulncheck -mode=binary "{{ .Path }}"
     flags:
       - -mod=vendor
     ldflags:

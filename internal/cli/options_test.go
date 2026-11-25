@@ -10,6 +10,21 @@ import (
 	"github.com/try-pulse/pulse-import/internal/statusmap"
 )
 
+func TestParseCommentResolution(t *testing.T) {
+	t.Parallel()
+	for _, bad := range []string{"ENG-1", "ENG-1=posted", "#1=retry", "ENG-1#0=posted", "ENG-1#2=yes"} {
+		if _, err := parseCommentResolution(bad); err == nil {
+			t.Fatalf("accepted %q", bad)
+		}
+	}
+	for _, decision := range []string{"posted", "retry"} {
+		got, err := parseCommentResolution("ENG-1#2=" + decision)
+		if err != nil || got.Key != "ENG-1" || got.Number != 2 || got.Posted != (decision == "posted") {
+			t.Fatalf("%s: resolution=%+v err=%v", decision, got, err)
+		}
+	}
+}
+
 func TestParseStatusFilter(t *testing.T) {
 	t.Parallel()
 	got, err := parseStatusFilter([]string{"done, qa", "backlog"}, "--skip-status")

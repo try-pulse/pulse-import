@@ -38,6 +38,22 @@ func (r *Runner) Execute(ctx context.Context, plan *Plan, opts ExecuteOptions) (
 	for _, item := range plan.Items {
 		itemsByKey[strings.ToLower(item.Key)] = item
 	}
+	if resolution := opts.ResolveComment; resolution != nil {
+		item, exists := itemsByKey[strings.ToLower(resolution.Key)]
+		state, found := journal.Item(resolution.Key)
+		if !exists || !found || state.Status != importstate.StatusCommentUnknown ||
+			state.RowHash != item.RowHash || resolution.Number != state.Comments+1 ||
+			resolution.Number < 1 || resolution.Number > len(item.Comments) {
+			return nil, fmt.Errorf("--resolve-comment requires a matching interrupted comment for %s#%d", resolution.Key, resolution.Number)
+		}
+		if resolution.Posted {
+			state.Comments++
+		}
+		state.Status = importstate.StatusDocUploaded
+		if err := journal.Mark(state); err != nil {
+			return nil, err
+		}
+	}
 	if err := r.applyAdoptions(ctx, journal, itemsByKey, opts.Adopt, plan.Options.TeamID); err != nil {
 		return nil, err
 	}
@@ -246,22 +262,10 @@ func (e *executor) resolveAmbiguous(
 		return state, nil
 
 	case importstate.StatusCommentUnknown:
-		// We are the only writer during an import, so the comment count is a
-		// reliable witness for whether the interrupted POST landed.
-		if state.Kind != importstate.KindProject && state.IssueID != "" {
-			if total, err := e.runner.API.CountComments(ctx, state.IssueID); err == nil &&
-				int(total) > state.Comments {
-				state.Comments = int(total)
-			}
+		return state, &UnknownOutcomeError{
+			Key: item.Key, StateFile: e.journal.Path(), CommentNumber: state.Comments + 1,
+			Cause: fmt.Errorf("previous attempt has no recorded response"),
 		}
-		state.Status = importstate.StatusDocUploaded
-		// The reconciled count has to be persisted before the comment phase runs:
-		// that phase reads the journal, not this local copy, and would otherwise
-		// re-post the comment whose response was lost.
-		if err := e.journal.Mark(state); err != nil {
-			return state, err
-		}
-		return state, nil
 	}
 
 	if state.EffectiveStatus() == importstate.StatusUnknown {
@@ -463,6 +467,11 @@ func (e *executor) postComments(ctx context.Context, item PreparedItem, entityID
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		// Persist intent before sending: the process can exit after Pulse accepts
+		// the comment but before we record its response.
+		if err := e.markComments(item, entityID, posted, importstate.StatusCommentUnknown); err != nil {
+			return err
+		}
 		_, err := e.runner.API.CreateComment(ctx, pulseapi.CreateCommentRequest{
 			TargetType: "issue", TargetID: entityID, Text: item.Comments[index],
 		})
@@ -475,18 +484,7 @@ func (e *executor) postComments(ctx context.Context, item PreparedItem, entityID
 		}
 
 		if pulseapi.IsAmbiguousWriteError(err) {
-			total, countErr := e.runner.API.CountComments(ctx, entityID)
-			if countErr == nil && int(total) > index {
-				posted = index + 1
-				if markErr := e.markComments(item, entityID, posted, importstate.StatusDocUploaded); markErr != nil {
-					return markErr
-				}
-				continue
-			}
-			if markErr := e.markComments(item, entityID, posted, importstate.StatusCommentUnknown); markErr != nil {
-				return markErr
-			}
-			return &UnknownOutcomeError{Key: item.Key, StateFile: e.journal.Path(), Cause: err}
+			return &UnknownOutcomeError{Key: item.Key, StateFile: e.journal.Path(), CommentNumber: index + 1, Cause: err}
 		}
 
 		if markErr := e.markComments(item, entityID, posted, importstate.StatusDocUploaded); markErr != nil {

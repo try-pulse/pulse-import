@@ -42,9 +42,23 @@ type Options struct {
 	Continue bool
 	NoPrompt bool
 
-	StateFile    string
-	Adopt        []string
-	RetryUnknown []string
+	StateFile      string
+	Adopt          []string
+	RetryUnknown   []string
+	ResolveComment string
+}
+
+func parseCommentResolution(value string) (*runner.CommentResolution, error) {
+	if value == "" {
+		return nil, nil
+	}
+	source, decision, _ := strings.Cut(value, "=")
+	key, ordinal, _ := strings.Cut(source, "#")
+	number, err := strconv.Atoi(ordinal)
+	if strings.TrimSpace(key) == "" || err != nil || number < 1 || (decision != "posted" && decision != "retry") {
+		return nil, fmt.Errorf("--resolve-comment expects JIRA-KEY#NUMBER=posted or JIRA-KEY#NUMBER=retry")
+	}
+	return &runner.CommentResolution{Key: strings.TrimSpace(key), Number: number, Posted: decision == "posted"}, nil
 }
 
 // assigneeMode resolves the assignee strategy from flags, falling back to a

@@ -39,7 +39,6 @@ type API interface {
 	GetProject(context.Context, string) (*pulseapi.Project, error)
 	UploadMainDoc(context.Context, string, string, string, []byte) (*pulseapi.Document, error)
 	CreateComment(context.Context, pulseapi.CreateCommentRequest) (*pulseapi.Comment, error)
-	CountComments(context.Context, string) (int64, error)
 	CountTeamIssues(context.Context, string) (int64, error)
 }
 

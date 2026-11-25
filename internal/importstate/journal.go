@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -16,6 +17,9 @@ import (
 // Version 2 records per-item progress through the create → doc → comments →
 // links ladder and drops the plan hash from the journal identity.
 const Version = 2
+
+// ErrJournalInUse means another import or rollback already owns this journal.
+var ErrJournalInUse = errors.New("state journal is already in use")
 
 type Status string
 
@@ -129,65 +133,89 @@ type Journal struct {
 }
 
 func Open(path string, identity Identity) (*Journal, error) {
+	return openJournal(path, &identity)
+}
+
+// OpenExisting opens a journal for rollback, using its recorded import identity.
+func OpenExisting(path string) (*Journal, error) {
+	return openJournal(path, nil)
+}
+
+func openJournal(path string, expected *Identity) (*Journal, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return nil, fmt.Errorf("state file path is required")
 	}
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, fmt.Errorf("create state directory: %w", err)
+	flags := os.O_RDWR
+	if expected != nil {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			return nil, fmt.Errorf("create state directory: %w", err)
+		}
+		flags |= os.O_CREATE
 	}
+	file, err := os.OpenFile(path, flags, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("open state file: %w", err)
+	}
+	if err := lockJournal(file); err != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("lock state file %s: %w", path, err)
+	}
+	j := &Journal{path: path, file: file, items: map[string]Item{}}
+	if err := j.restore(expected); err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	return j, nil
+}
 
-	j := &Journal{path: path, identity: identity, items: map[string]Item{}}
-	data, err := os.ReadFile(path)
-	switch {
-	case err == nil:
-		if repaired, ok := repairIncompleteTail(data); ok {
-			if err := os.Truncate(path, int64(len(repaired))); err != nil {
-				return nil, fmt.Errorf("repair incomplete state tail: %w", err)
-			}
-			data = repaired
-		}
+// Read, repair and append through the same locked descriptor. A crash or Close
+// releases the kernel lock; another opener must then replay the latest state.
+func (j *Journal) restore(expected *Identity) error {
+	data, err := io.ReadAll(j.file)
+	if err != nil {
+		return fmt.Errorf("read state file: %w", err)
+	}
+	data, tornTail := repairIncompleteTail(data)
+	if len(data) != 0 {
 		if err := j.replay(data); err != nil {
-			return nil, err
+			return err
 		}
-		if j.identity != identity {
-			return nil, fmt.Errorf(
+		if expected != nil && j.identity != *expected {
+			return fmt.Errorf(
 				"state file %s belongs to a different import: it was written for "+
 					"importer=%q source=%q team=%q project=%q, but this run targets "+
 					"importer=%q source=%q team=%q project=%q. Point --state-file at a new "+
 					"path, or re-run with the original source and target to resume",
-				path,
+				j.path,
 				j.identity.Importer, j.identity.SourceFingerprint, j.identity.TeamID, j.identity.ProjectID,
-				identity.Importer, identity.SourceFingerprint, identity.TeamID, identity.ProjectID,
+				expected.Importer, expected.SourceFingerprint, expected.TeamID, expected.ProjectID,
 			)
 		}
-	case os.IsNotExist(err):
-	default:
-		return nil, fmt.Errorf("read state file: %w", err)
+	} else if expected == nil {
+		return fmt.Errorf("state file is empty")
 	}
-
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-	if err != nil {
-		return nil, fmt.Errorf("open state file: %w", err)
+	if tornTail {
+		if err := j.file.Truncate(int64(len(data))); err != nil {
+			return fmt.Errorf("repair incomplete state tail: %w", err)
+		}
+		if _, err := j.file.Seek(0, io.SeekEnd); err != nil {
+			return fmt.Errorf("seek to repaired state tail: %w", err)
+		}
 	}
-	j.file = file
-	if err := file.Chmod(0o600); err != nil {
-		_ = file.Close()
-		return nil, fmt.Errorf("secure state file: %w", err)
+	if err := j.file.Chmod(0o600); err != nil {
+		return fmt.Errorf("secure state file: %w", err)
 	}
 	if len(data) == 0 {
-		if err := j.append(event{
+		j.identity = *expected
+		return j.append(event{
 			Version:  Version,
 			Type:     "header",
 			Time:     time.Now().UTC(),
-			Identity: &identity,
-		}); err != nil {
-			_ = file.Close()
-			return nil, err
-		}
+			Identity: expected,
+		})
 	}
-	return j, nil
+	return nil
 }
 
 func repairIncompleteTail(data []byte) ([]byte, bool) {
@@ -409,10 +437,7 @@ func validStatus(status Status) bool {
 	}
 }
 
-// ReadIdentity extracts the header identity from raw journal bytes without
-// binding the journal to a target. Rollback needs this: the state file is the
-// authority on where an import went, so it must be read before it can be
-// validated against anything.
+// ReadIdentity extracts the header identity from a snapshot of journal bytes.
 func ReadIdentity(data []byte) (Identity, error) {
 	line, _, _ := bytes.Cut(data, []byte("\n"))
 	line = bytes.TrimSpace(line)

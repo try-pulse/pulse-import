@@ -1,12 +1,18 @@
 package importstate_test
 
 import (
+	"bufio"
+	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/try-pulse/pulse-import/internal/importstate"
 )
@@ -16,6 +22,122 @@ func identity() importstate.Identity {
 		Importer: "jira-csv", SourceURL: "https://acme.atlassian.net",
 		SourceFingerprint: "source", APIURL: "https://api.example.com/api/v1",
 		WorkspaceID: "workspace", TeamID: "team",
+	}
+}
+
+func TestExclusiveJournalAcrossProcesses(t *testing.T) {
+	const childProcess = "PULSE_IMPORT_TEST_JOURNAL_HOLDER"
+	if os.Getenv(childProcess) == "1" {
+		const path = "state.jsonl"
+		journal, err := importstate.Open(path, identity())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = journal.Close() }()
+		if err := journal.Mark(importstate.Item{
+			Key: "ENG-1", RowHash: "row", IssueID: "issue", Status: importstate.StatusCommentUnknown,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		// A partial write models a torn final record. A contender must not repair
+		// it until this process releases the lock.
+		tail, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tail.WriteString("{partial"); err != nil {
+			t.Fatal(err)
+		}
+		if err := tail.Close(); err != nil {
+			t.Fatal(err)
+		}
+		fmt.Println("locked")
+		if _, err := io.Copy(io.Discard, os.Stdin); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+
+	for _, mode := range []string{"close", "crash"} {
+		t.Run(mode, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "state.jsonl")
+			ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+			defer cancel()
+			testBinary, err := os.Executable()
+			if err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.CommandContext(ctx, testBinary, "-test.run=^TestExclusiveJournalAcrossProcesses$") // #nosec G204 -- re-exec this test binary with a fixed test selector.
+			cmd.Dir = dir
+			cmd.Env = append(os.Environ(), childProcess+"=1")
+			cmd.Stderr = os.Stderr
+			stdin, err := cmd.StdinPipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			stdout, err := cmd.StdoutPipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if cmd.ProcessState == nil {
+					_ = cmd.Process.Kill()
+					_ = cmd.Wait()
+				}
+			})
+			ready, err := bufio.NewReader(stdout).ReadString('\n')
+			if err != nil || strings.TrimSpace(ready) != "locked" {
+				t.Fatalf("child did not lock journal: %q, %v", ready, err)
+			}
+			if _, err := importstate.Open(path, identity()); !errors.Is(err, importstate.ErrJournalInUse) {
+				t.Fatalf("competing import: %v", err)
+			}
+			if _, err := importstate.OpenExisting(path); !errors.Is(err, importstate.ErrJournalInUse) {
+				t.Fatalf("competing rollback: %v", err)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil || !strings.HasSuffix(string(data), "{partial") {
+				t.Fatalf("contender changed the journal tail: %v", err)
+			}
+			if mode == "crash" {
+				if err := cmd.Process.Kill(); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := stdin.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if err := cmd.Wait(); (err != nil) != (mode == "crash") {
+				t.Fatalf("child exit: %v", err)
+			}
+			reopened, err := importstate.OpenExisting(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = reopened.Close() }()
+			item, ok := reopened.Item("ENG-1")
+			if !ok || item.Status != importstate.StatusCommentUnknown || reopened.Identity() != identity() {
+				t.Fatalf("lost interrupted comment or identity: %+v", item)
+			}
+			item.Status, item.Comments = importstate.StatusDocUploaded, 1
+			if err := reopened.Mark(item); err != nil {
+				t.Fatal(err)
+			}
+			if err := reopened.Close(); err != nil {
+				t.Fatal(err)
+			}
+			resumed, err := importstate.Open(path, identity())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = resumed.Close() }()
+			if item, ok := resumed.Item("ENG-1"); !ok || item.Comments != 1 {
+				t.Fatalf("resolution lost after tail repair: %+v", item)
+			}
+		})
 	}
 }
 

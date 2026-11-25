@@ -87,17 +87,12 @@ func runRollback(cmd *cobra.Command, opts rollbackOptions, deps Dependencies) er
 		return err
 	}
 
-	// Opening with the journal's own identity keeps this read-only with respect
-	// to the identity check: rollback must never rewrite what an import targeted.
-	identity, err := readIdentity(stateFile)
-	if err != nil {
-		return err
-	}
-	journal, err := importstate.Open(stateFile, identity)
+	journal, err := importstate.OpenExisting(stateFile)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = journal.Close() }()
+	identity := journal.Identity()
 
 	targets := rollbackTargets(journal.Items(), opts.KeepDocs)
 	if len(targets) == 0 {
@@ -237,19 +232,4 @@ func deleteTargets(
 		}
 	}
 	return deleted, failed
-}
-
-// readIdentity reads the header of a state file without validating it against a
-// target, which is what rollback needs: the journal itself is the source of
-// truth for where the import went.
-func readIdentity(path string) (importstate.Identity, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return importstate.Identity{}, fmt.Errorf("read state file: %w", err)
-	}
-	identity, err := importstate.ReadIdentity(data)
-	if err != nil {
-		return importstate.Identity{}, fmt.Errorf("%s: %w", path, err)
-	}
-	return identity, nil
 }

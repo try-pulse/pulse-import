@@ -273,7 +273,14 @@ type ExecuteOptions struct {
 	ContinueOnError bool
 	Adopt           map[string]string
 	RetryUnknown    map[string]bool
+	ResolveComment  *CommentResolution
 	OnProgress      func(Progress)
+}
+
+type CommentResolution struct {
+	Key    string
+	Number int // One-based index in the row's prepared comments.
+	Posted bool
 }
 
 type Result struct {
@@ -300,12 +307,17 @@ func (e *PartialError) Error() string {
 }
 
 type UnknownOutcomeError struct {
-	Key       string
-	StateFile string
-	Cause     error
+	Key           string
+	StateFile     string
+	CommentNumber int
+	Cause         error
 }
 
 func (e *UnknownOutcomeError) Error() string {
+	if e.CommentNumber > 0 {
+		return fmt.Sprintf("outcome for %s comment #%d is unknown (%v). Inspect the issue in Pulse, then use --resolve-comment '%s#%d=posted' if it landed or '%s#%d=retry' if it is missing (state: %s)",
+			e.Key, e.CommentNumber, e.Cause, e.Key, e.CommentNumber, e.Key, e.CommentNumber, e.StateFile)
+	}
 	return fmt.Sprintf(
 		"outcome for %s is unknown; inspect Pulse, then use --adopt or --retry-unknown (state: %s): %v",
 		e.Key, e.StateFile, e.Cause,

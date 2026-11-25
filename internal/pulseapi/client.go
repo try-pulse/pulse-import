@@ -725,24 +725,6 @@ func (c *Client) CreateComment(ctx context.Context, req CreateCommentRequest) (*
 	return &wrap.Comment, nil
 }
 
-// CountComments reports how many comments an issue already carries, so a
-// resumed import can tell which of a row's comments were already posted.
-func (c *Client) CountComments(ctx context.Context, issueID string) (int64, error) {
-	query := url.Values{}
-	query.Set("target_type", "issue")
-	query.Set("target_id", issueID)
-	query.Set("limit", "1")
-	out, err := get[struct {
-		Pagination struct {
-			Total int64 `json:"total"`
-		} `json:"pagination"`
-	}](c, ctx, "/comments?"+query.Encode())
-	if err != nil {
-		return 0, err
-	}
-	return out.Pagination.Total, nil
-}
-
 func (c *Client) DeleteIssue(ctx context.Context, issueID string) error {
 	_, err := c.doRaw(ctx, http.MethodDelete, "/issues/"+url.PathEscape(issueID), nil)
 	return err

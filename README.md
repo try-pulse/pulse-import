@@ -11,7 +11,7 @@
   <tr>
     <td><a href="https://github.com/try-pulse/pulse-import/actions/workflows/ci.yml?query=branch%3Amain"><img src="https://github.com/try-pulse/pulse-import/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a></td>
     <td><a href="https://github.com/try-pulse/pulse-import/releases/latest"><img src="https://img.shields.io/github/v/release/try-pulse/pulse-import?sort=semver&label=release" alt="Release"></a></td>
-    <td><a href="https://go.dev/"><img src="https://img.shields.io/badge/Go-1.25.8+-00ADD8?logo=go&logoColor=white" alt="Go"></a></td>
+    <td><a href="https://go.dev/"><img src="https://img.shields.io/badge/Go-1.26.11+-00ADD8?logo=go&logoColor=white" alt="Go"></a></td>
     <td><a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License"></a></td>
     <td><a href="https://github.com/try-pulse/pulse-import/pkgs/container/pulse-import"><img src="https://img.shields.io/badge/GHCR-pulse--import-blue?logo=github" alt="GHCR"></a></td>
   </tr>
@@ -108,8 +108,10 @@ PULSE_ACCESS_TOKEN=… pulse-import \
 
 ### Undo an import
 
-Every run writes a state journal recording exactly what it created. `rollback`
-deletes precisely that and nothing else:
+CLI imports write directly to Pulse and keep their history in the local state
+journal. Keep that file to resume or roll back a CLI import. The web app's
+import history and rollback controls cover runs started in the web import
+assistant.
 
 ```bash
 pulse-import rollback --state-file ./jira-export.csv.pulse-import.state.jsonl
@@ -149,6 +151,7 @@ imported.
 | `--state-file` | Resume journal path; defaults beside the CSV |
 | `--adopt KEY=ID` | Resolve an unknown create with an existing Pulse entity |
 | `--retry-unknown KEY` | Explicitly retry an unknown create; may duplicate |
+| `--resolve-comment 'KEY#N=posted'` or `'KEY#N=retry'` | Resolve interrupted source comment N (counting from 1) after inspecting the issue |
 | `-v` / `--version` | Print version |
 
 ## Field mapping
@@ -217,6 +220,14 @@ pulse-import ... --adopt ENG-123=64f... --yes
 # Only when you confirmed no issue exists:
 pulse-import ... --retry-unknown ENG-123 --yes
 ```
+
+An interrupted comment also pauses the row. Check the issue against the Jira
+source comment named in the error. If comment 2 for ENG-123 is already there,
+resume with `--resolve-comment 'ENG-123#2=posted'`. If it is missing, use
+`--resolve-comment 'ENG-123#2=retry'`.
+
+Only one import or rollback can use a state journal at a time. If another
+process owns it, wait for that process to exit, then rerun the command.
 
 Changing the source file or the target workspace/team/project requires a
 different state file.

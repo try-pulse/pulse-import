@@ -370,15 +370,14 @@ func TestAmbiguousMainDocUploadIsReconciled(t *testing.T) {
 	}
 }
 
-func TestAmbiguousCommentIsReconciledFromTheCommentCount(t *testing.T) {
+func TestUnrelatedCommentCannotResolveAnAmbiguousPost(t *testing.T) {
 	t.Parallel()
 	api := newFakePulse()
 	failed := false
 	api.commentHook = func(issueID, text string) (*pulseapi.Comment, error) {
 		if !failed {
 			failed = true
-			// The comment landed; the response was lost.
-			api.comments[issueID] = append(api.comments[issueID], text)
+			api.comments[issueID] = append(api.comments[issueID], "a teammate replied")
 			return nil, apiError(http.StatusBadGateway, "", "bad gateway")
 		}
 		return nil, nil
@@ -388,13 +387,29 @@ func TestAmbiguousCommentIsReconciledFromTheCommentCount(t *testing.T) {
 	data.Issues[0].Comments = []importers.Comment{{Body: "one"}, {Body: "two"}}
 	plan := prepare(t, api, data)
 
-	result, err := execute(t, api, plan, statePath(t))
+	state := statePath(t)
+	for range 2 {
+		_, err := execute(t, api, plan, state)
+		var unknown *runner.UnknownOutcomeError
+		if !errors.As(err, &unknown) || unknown.CommentNumber != 1 {
+			t.Fatalf("want interrupted comment #1, got %v", err)
+		}
+	}
+	_, err := execute(t, api, plan, state, func(o *runner.ExecuteOptions) {
+		o.ResolveComment = &runner.CommentResolution{Key: "ENG-1", Number: 2, Posted: true}
+	})
+	if err == nil {
+		t.Fatal("accepted a decision for a different comment")
+	}
+	result, err := execute(t, api, plan, state, func(o *runner.ExecuteOptions) {
+		o.ResolveComment = &runner.CommentResolution{Key: "eng-1", Number: 1, Posted: false}
+	})
 	if err != nil {
 		t.Fatalf("execute: %v (errors %v)", err, result.Errors)
 	}
 	issue := api.issueByTitle("Commented")
-	if got := api.commentsFor(issue.ID); len(got) != 2 {
-		t.Fatalf("comments = %v; the lost-response comment must not be posted twice", got)
+	if got := api.commentsFor(issue.ID); len(got) != 3 || got[1] != "one" || got[2] != "two" {
+		t.Fatalf("comments = %v; an unrelated comment must not displace a source comment", got)
 	}
 }
 
@@ -745,11 +760,7 @@ func TestAFailedPhaseDoesNotMarkTheItemComplete(t *testing.T) {
 	}
 }
 
-// A comment POST whose response was lost leaves the item at comment_unknown. The
-// next run must reconcile the count and persist it before the comment phase runs,
-// otherwise that phase re-reads the old count from the journal and posts the
-// comment twice.
-func TestCommentUnknownIsReconciledAcrossRuns(t *testing.T) {
+func TestPostedCommentDecisionResumesAtNextSourceComment(t *testing.T) {
 	t.Parallel()
 	state := statePath(t)
 	api := newFakePulse()
@@ -757,23 +768,19 @@ func TestCommentUnknownIsReconciledAcrossRuns(t *testing.T) {
 	data := source(issue("ENG-1", "Commented"))
 	data.Issues[0].Comments = []importers.Comment{{Body: "one"}, {Body: "two"}}
 
-	// First run: the first comment lands but the response is lost, and the
-	// count lookup fails too, so the item is parked at comment_unknown.
+	// The server accepted the first comment and lost its response.
 	api.commentHook = func(issueID, text string) (*pulseapi.Comment, error) {
 		api.comments[issueID] = append(api.comments[issueID], text)
 		return nil, apiError(http.StatusBadGateway, "", "bad gateway")
-	}
-	api.countCommentsHook = func(string) (int64, error) {
-		return 0, apiError(http.StatusBadGateway, "", "bad gateway")
 	}
 	if _, err := execute(t, api, prepare(t, api, data), state); err == nil {
 		t.Fatal("expected an unknown outcome")
 	}
 
-	// Second run: everything works again.
 	api.commentHook = nil
-	api.countCommentsHook = nil
-	result, err := execute(t, api, prepare(t, api, data), state)
+	result, err := execute(t, api, prepare(t, api, data), state, func(o *runner.ExecuteOptions) {
+		o.ResolveComment = &runner.CommentResolution{Key: "ENG-1", Number: 1, Posted: true}
+	})
 	if err != nil {
 		t.Fatalf("resume: %v (errors %v)", err, result.Errors)
 	}
