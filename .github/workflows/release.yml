@@ -7,18 +7,46 @@ on:
       - "v[0-9]+.[0-9]+.[0-9]+"
       # Pre-release: v1.2.3-rc.1, v1.2.3-beta.2, …
       - "v[0-9]+.[0-9]+.[0-9]+-*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to retry from main
+        required: true
+        type: string
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
   test:
+    if: github.event_name == 'push' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    outputs:
+      commit: ${{ steps.target.outputs.commit }}
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Select the tagged source
+        id: target
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]
+          commit=$(git rev-parse --verify "refs/tags/${RELEASE_TAG}^{commit}")
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            # Retrying an older release would move the container's latest tag backwards.
+            [[ "$(git describe --first-parent --abbrev=0 --match 'v[0-9]*' HEAD)" == "$RELEASE_TAG" ]]
+            git merge-base --is-ancestor "$commit" HEAD
+            git checkout --detach "$commit"
+          fi
+          [[ "$(git rev-parse HEAD)" == "$commit" ]]
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-go@v7
         with:
@@ -38,7 +66,7 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
-          version: v2.12.2
+          version: v2.15.0
 
       - name: govulncheck
         run: |
@@ -55,6 +83,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ needs.test.outputs.commit }}
           fetch-depth: 0
 
       - uses: actions/setup-go@v7
@@ -83,4 +112,5 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GORELEASER_CURRENT_TAG: ${{ inputs.tag || github.ref_name }}
           GOFLAGS: -mod=vendor

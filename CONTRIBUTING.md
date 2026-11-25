@@ -56,6 +56,11 @@ Releases are **tag-driven** via GitHub Actions + [GoReleaser](https://goreleaser
 
 Do **not** create GitHub Releases by hand. Do **not** force-push tags that already published artifacts.
 
+If a release fails before publishing because its workflow needs a fix, push the
+workflow fix to `main`. Retry the existing tag with
+`gh workflow run release.yml --ref main -f tag=vX.Y.Z`. The retry accepts
+the latest release tag on `main` and tests and builds that tag's commit.
+
 Local dry-run (no GitHub upload):
 
 ```bash
